@@ -4,7 +4,7 @@
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
   "version": "0.2.4",
   "publisher": "nadavLan",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
     "vscode": "^1.85.0"
   },

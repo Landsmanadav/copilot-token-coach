@@ -215,4 +215,4 @@ highlight any expensive ones.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+PolyForm Noncommercial License 1.0.0 — free for noncommercial use. Commercial use requires a separate license. See [LICENSE](LICENSE).

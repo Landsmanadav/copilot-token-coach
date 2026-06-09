@@ -1,0 +1,131 @@
+{
+  "name": "token-coach",
+  "displayName": "Token Coach",
+  "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
+  "version": "0.2.4",
+  "publisher": "nadavLan",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "copilot",
+    "tokens",
+    "cost",
+    "cache",
+    "ai"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokenCoach.showDashboard",
+        "title": "Token Coach: Show Dashboard",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "tokenCoach.refresh",
+        "title": "Token Coach: Refresh Logs",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tokenCoach.calibrate",
+        "title": "Token Coach: Calibrate $ to GitHub billing",
+        "icon": "$(settings-gear)"
+      }
+    ],
+    "configuration": {
+      "title": "Token Coach",
+      "properties": {
+        "tokenCoach.costWarnThreshold": {
+          "type": "number",
+          "default": 3000000000,
+          "markdownDescription": "Flag any request whose cost (in `copilotUsageNanoAiu`) exceeds this value. Default `3000000000` (= 3 AIU)."
+        },
+        "tokenCoach.inputWarnThreshold": {
+          "type": "number",
+          "default": 50000,
+          "markdownDescription": "Flag any request whose `inputTokens` exceed this value. Default `50000`."
+        },
+        "tokenCoach.lowCacheRateThreshold": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "maximum": 1,
+          "markdownDescription": "Flag requests whose cache hit rate (`cachedTokens / inputTokens`) is below this value (only when input is also large — see `lowCacheMinInputTokens`). Default `0.5`."
+        },
+        "tokenCoach.lowCacheMinInputTokens": {
+          "type": "number",
+          "default": 20000,
+          "markdownDescription": "Minimum `inputTokens` before the low-cache-hit rule fires. Avoids nagging on tiny requests. Default `20000`."
+        },
+        "tokenCoach.ioRatioThreshold": {
+          "type": "number",
+          "default": 1000,
+          "markdownDescription": "Flag requests where `inputTokens / outputTokens` exceeds this value (huge input, tiny output). Default `1000`."
+        },
+        "tokenCoach.ioMinInputTokens": {
+          "type": "number",
+          "default": 10000,
+          "markdownDescription": "Minimum `inputTokens` before the tiny-output rule fires, so small side-calls (e.g. a 2-token reply on 2K input) aren't mislabelled as 'huge input'. Default `10000`."
+        },
+        "tokenCoach.attachmentShareWarn": {
+          "type": "number",
+          "default": 0.4,
+          "minimum": 0,
+          "maximum": 1,
+          "markdownDescription": "Flag a message when open/attached files make up more than this share of its **logged** context (Copilot only itemizes context on the first turn; the system prompt and cached history aren't included). Default `0.4` (40%)."
+        },
+        "tokenCoach.slowToolWarnMs": {
+          "type": "number",
+          "default": 10000,
+          "markdownDescription": "Flag a message when a single tool consumes more than this many milliseconds (summed across calls). Default `10000` (10s)."
+        },
+        "tokenCoach.usdPerAiu": {
+          "type": "number",
+          "default": 0.01,
+          "markdownDescription": "US dollars per 1 AIU. GitHub's June 2026 usage-based billing prices **1 AI credit = $0.01**, and 1 AIU ≈ 1 AI credit, so the default is `0.01`. Set to `0` to hide dollar estimates."
+        },
+        "tokenCoach.planMonthlyUsd": {
+          "type": "number",
+          "default": 19,
+          "markdownDescription": "Your monthly Copilot plan price per user, used for the 'plan budget' gauge. Copilot **Business = $19**, **Enterprise / Pro+ = $39**. Each plan includes that many dollars of AI credits per month."
+        },
+        "tokenCoach.notifyOnExpensiveRequest": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show a notification when a newly logged request exceeds the cost threshold."
+        },
+        "tokenCoach.pollIntervalSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "markdownDescription": "Backup polling interval (seconds) used in addition to the file watcher. Set to `0` to disable polling and rely on the watcher only."
+        },
+        "tokenCoach.workspaceStoragePathOverride": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional absolute path to a `workspaceStorage` directory. Useful for testing or non-standard installs. Leave empty to auto-detect the standard per-OS locations."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

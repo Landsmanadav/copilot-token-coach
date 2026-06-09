@@ -1,0 +1,23 @@
+# Everything is included by default; list what to EXCLUDE from the .vsix.
+# (No "!negations" — they re-include unintended files like source maps.)
+
+.vscode/**
+.vscode-test/**
+src/**
+node_modules/**
+
+**/*.ts
+**/*.map
+
+.gitignore
+.vscodeignore
+tsconfig.json
+package-lock.json
+
+.DS_Store
+*.vsix
+*.zip
+
+# Stray build artifacts that can appear in the project root
+vsce
+copilot-token-coach@*

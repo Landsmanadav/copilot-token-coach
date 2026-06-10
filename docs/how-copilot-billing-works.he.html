@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>איך Copilot באמת מחייב אותך — מדריך Token Coach</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #57606a; --line: #d0d7de;
+    --card: #f6f8fa; --accent: #0969da; --good: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+    --code-bg: #eff2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b; --fg: #e6edf3; --muted: #9da7b1; --line: #30363d;
+      --card: #1c2128; --accent: #58a6ff; --good: #3fb950; --warn: #d29922; --bad: #f85149;
+      --code-bg: #22272e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 20px; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, "Heebo", "Assistant", Arial, sans-serif;
+    font-size: 17px; line-height: 1.75;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.9em; line-height: 1.3; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin: 0 0 32px; font-size: 1.05em; }
+  h2 {
+    font-size: 1.35em; margin: 44px 0 12px; padding-top: 20px;
+    border-top: 1px solid var(--line);
+  }
+  h3 { font-size: 1.1em; margin: 24px 0 8px; }
+  p { margin: 10px 0; }
+  b { font-weight: 700; }
+  .muted { color: var(--muted); }
+  code, .num {
+    direction: ltr; unicode-bidi: embed;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.88em; background: var(--code-bg);
+    padding: 1px 6px; border-radius: 5px;
+  }
+  .keybox {
+    background: var(--card); border: 1px solid var(--line); border-right: 4px solid var(--accent);
+    border-radius: 8px; padding: 14px 18px; margin: 18px 0; font-size: 1.05em;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.95em; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.85em; }
+  td.ltr, th.ltr { direction: ltr; text-align: left; font-variant-numeric: tabular-nums; }
+  .flow {
+    direction: ltr; text-align: left;
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 18px; margin: 14px 0; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em;
+    line-height: 1.7; white-space: pre;
+  }
+  .good { color: var(--good); font-weight: 700; }
+  .warn { color: var(--warn); font-weight: 700; }
+  .bad  { color: var(--bad);  font-weight: 700; }
+  .tip {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 16px; margin: 10px 0;
+  }
+  .tip b:first-child { display: inline-block; margin-left: 4px; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85em; }
+  @media print {
+    body { padding: 0; font-size: 12pt; }
+    h2 { break-after: avoid; }
+    .flow, .keybox, .tip, table { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>איך Copilot באמת מחייב אותך 💸</h1>
+<p class="subtitle">מדריך קריא לדשבורד של Token Coach — עם המספרים האמיתיים מהשיחה שלך כדוגמה</p>
+
+<div class="keybox">
+  💡 <b>המשפט היחיד שצריך לזכור:</b><br/>
+  התור הראשון של כל צ'אט <b>קונה</b> את ההקשר במחיר מלא. כל התורים אחריו <b>שוכרים</b> אותו מה־cache בערך בעשירית מחיר.
+</div>
+
+<h2>1. מה בכלל נשלח למודל בכל בקשה?</h2>
+<p>בכל פעם שהסוכן של Copilot פונה למודל, הוא שולח לו <b>את הכל, מההתחלה</b>. למודל אין זיכרון בין בקשות — אז כל בקשה כוללת:</p>
+
+<table>
+  <tr><th>מה</th><th>גודל טיפוסי</th><th>מי שולט בזה</th></tr>
+  <tr>
+    <td><b>הגדרות הכלים</b> ("התפריט") — תיאור JSON של <i>כל</i> כלי שהסוכן יכול להפעיל: <code>read_file</code>, <code>create_file</code>, כל כלי MCP…</td>
+    <td class="ltr">≈23,000 tok</td>
+    <td>Copilot (אפשר לצמצם רק ע"י כיבוי שרתי MCP שלא בשימוש)</td>
+  </tr>
+  <tr>
+    <td><b>הוראות המערכת</b> (System prompt) — ההנחיות הקבועות שמגדירות איך העוזר מתנהג</td>
+    <td class="ltr">≈6,000 tok</td>
+    <td>Copilot — קבוע</td>
+  </tr>
+  <tr>
+    <td><b>ההקשר שלך</b> — ההודעה שלך, קבצים פתוחים/מצורפים, היסטוריית השיחה, תוצאות כלים מתורים קודמים</td>
+    <td class="ltr">משתנה — גדל מתור לתור</td>
+    <td><b>אתה</b> ✂️</td>
+  </tr>
+</table>
+
+<div class="keybox">
+  🍽️ <b>משל המסעדה:</b> "הגדרות הכלים" זה <b>התפריט</b> — מודפס במלואו ומוגש עם כל הזמנה, גם אם לא הזמנת כלום.
+  הכלים שבאמת הופעלו (<code>read_file</code> וכו') זה <b>מה שהזמנת והאוכל שהגיע</b> — תוכן הקבצים שנקראו נכנס לשיחה כתוצאות, לא לתפריט.
+</div>
+
+<h2>2. אז למה זה לא עולה הון? בגלל ה־Cache</h2>
+<p>אם בכל תור נשלחים מחדש ~29,000 טוקנים של תקורה — איך זה לא מתפוצץ? כי קיים <b>prompt cache</b>:</p>
+<table>
+  <tr><th>תור</th><th>מה קורה</th><th>מחיר</th></tr>
+  <tr>
+    <td><b>תור 0 (הראשון בצ'אט)</b></td>
+    <td>ה־cache ריק (<span class="num">cache 0%</span>). המודל קורא הכל במחיר מלא — <b>ותוך כדי ממלא את ה־cache</b>.</td>
+    <td class="bad">מחיר מלא — פעם אחת</td>
+  </tr>
+  <tr>
+    <td><b>כל תור אחריו</b></td>
+    <td>החלק שחוזר על עצמו (התפריט, הוראות המערכת, ההיסטוריה) נקרא מה־cache. משלמים מחיר מלא רק על מה ש<b>חדש</b>.</td>
+    <td class="good">≈ עשירית מחיר על החלק הקבוע</td>
+  </tr>
+</table>
+<p>לכן התג <span class="num">CACHED</span> בדשבורד <b>לא אומר "חינם"</b> — הוא אומר "זה החלק שה־cache שומר". בתור הראשון משלמים עליו במלואו; מהתור השני הוא כמעט חינם.</p>
+<p>⚠️ שימו לב: ה־cache פג אחרי ~5 דקות של חוסר פעילות. הפסקה ארוכה באמצע צ'אט = התור הבא משלם שוב "מחיר כניסה".</p>
+
+<h2>3. הדוגמה האמיתית שלך: ‎6.84 AIU על "צור לי קובץ MD שמסביר את הפרויקט"</h2>
+<p>ככה נראתה הלולאה של הסוכן, תור אחר תור (כל המספרים אמיתיים מהלוג):</p>
+
+<div class="flow">TURN 0   you: "what is the project about? create an md file"
+         model in 29,058 · out 686 · cache 0%          ➜ 3.98 AIU
+         (it answers: "I need to read some files first")
+
+TURN 1   🔧 read_file package.json   → +≈985  tok into context
+         🔧 read_file README.md      → +≈1,107 tok
+         🔧 read_file index.html     → +≈718  tok
+         🔧 read_file RESEARCH.md    → +≈1,253 tok
+         🔧 read_file App.jsx        → +≈955  tok
+         🔧 manage_todo_list         → +≈5    tok
+         model in 31,817 · out 2,655 · cache 91%       ➜ 1.96 AIU
+         side-model (gpt-4o-mini) in 2,302 · out 2     ➜ 0.04 AIU
+         (chat title / tiny classification — automatic)
+
+TURN 2   🔧 create_file              → +≈123  tok
+         model in 34,525 · out 397 · cache 92%         ➜ 0.86 AIU
+         (the final answer you saw in chat)
+
+                                            TOTAL  =  6.84 AIU ≈ $0.07</div>
+
+<h3>מה קרה כאן בעצם?</h3>
+<p><b>תור 0:</b> שילמת 3.98 — כמעט הכל זה "קניית" 29 אלף הטוקנים של התקורה במחיר מלא, כי ה־cache היה ריק. המודל עוד לא ענה — הוא רק ביקש לקרוא קבצים.</p>
+<p><b>תור 1 (האמצע):</b> שורות ה־🔧 הן <b>לא</b> קריאות למודל — אלה הכלים שרצים אצלך במחשב. הם לא עולים כסף בעצמם, אבל התוצאות שלהם (~5,000 טוקנים של תוכן קבצים) <b>מתווספות להקשר</b>. אחר כך המודל נקרא שוב: הקלט גדל ל־31,817, אבל 91% ממנו הגיע מה־cache — אז שילמת רק 1.96, בעיקר על תוכן הקבצים החדש ועל 2,655 טוקני הפלט (פלט יקר יותר מקלט!).</p>
+<p><b>הקריאה הקטנה של gpt-4o-mini:</b> זה "extra model call" — Copilot מפעיל ברקע מודל זול למשימה זעירה (לרוב כותרת לצ'אט). ‎0.04 AIU, אוטומטי, לא בשליטתך.</p>
+<p><b>תור 2:</b> הקובץ נוצר, המודל סיכם וענה. קלט של 34,525 (הכי גדול!) אבל רק ‎0.86 AIU — כי 92% מה־cache.</p>
+
+<div class="keybox">
+  📉 <b>שימו לב לדפוס:</b> הקלט רק <b>גדל</b> (29 → 31 → 34 אלף) אבל העלות רק <b>יורדת</b> (3.98 → 1.96 → 0.86) — כי אחוז ה־cache עולה. זו כל תורת החיסכון.
+</div>
+
+<h2>4. "רגע, המספרים לא מסתדרים!" — הערכה מול ספירה אמיתית</h2>
+<p>בדשבורד ראית שהתקורה היא <span class="num">≈29,606 tok</span> בעוד שתור 0 כולו היה <span class="num">in 29,058</span>. איך חלק גדול מהשלם? כי אלה <b>שני סרגלים שונים</b>:</p>
+<table>
+  <tr><th>מספר</th><th>איך נמדד</th></tr>
+  <tr><td><span class="num">in 29,058</span></td><td><b>ספירה אמיתית</b> — המודל עצמו דיווח כמה טוקנים קיבל</td></tr>
+  <tr><td><span class="num">≈29,606</span></td><td><b>הערכה</b> — אורך הטקסט מהלוג חלקי 4 (בערך 4 תווים = טוקן). בגלל זה ה־≈</td></tr>
+</table>
+<p>החשבון: ‎≈29,606 תקורה + ‎≈894 הקשר שלך = ‎≈30,500 מוערך, מול 29,058 אמיתי — סטייה של <b>~5%</b>, בדיוק הדיוק המצופה מהערכה כזו. כמו למדוד קיר בצעדים מול מטר־בנייה: הקיר לא שבור, הצעדים גסים.</p>
+
+<h2>5. מה אפשר לעשות עם זה בפועל? ✂️</h2>
+<div class="tip">🧵 <b>להישאר באותו צ'אט</b> כשממשיכים באותו נושא. כל צ'אט חדש משלם שוב את "מחיר הכניסה" (אצלך: ~4 AIU). אבל נושא חדש לגמרי בצ'אט ענק? דווקא צ'אט חדש וממוקד יוצא זול יותר.</div>
+<div class="tip">⏱️ <b>לא להשאיר צ'אט "מתבשל"</b> — ה־cache פג אחרי ~5 דקות. אם יש לכמה שאלות על אותו נושא, עדיף ברצף.</div>
+<div class="tip">🔌 <b>לכבות שרתי MCP וכלים שלא בשימוש</b> — זה הדבר היחיד שמקטין את "התפריט" (23 אלף טוקנים שנשלחים בכל בקשה). הדשבורד מראה אילו כלים מוגדרים אבל אף פעם לא הופעלו.</div>
+<div class="tip">📑 <b>לסגור טאבים לא רלוונטיים</b> — קבצים פתוחים נשלחים כהקשר בכל תור. זה החלק ה"✂️" שבשליטתך המלאה.</div>
+<div class="tip">🤖 <b>שאלות קטנות → מודל בסיסי</b> — לשאלה קצרה בלי כלים, מודל included‏ (GPT-4.1/4o) עולה 0 מהתקציב הפרימיום.</div>
+
+<h2>6. מילון מונחים קצר</h2>
+<table>
+  <tr><th>מונח</th><th>פירוש</th></tr>
+  <tr><td><b>AIU / קרדיט</b></td><td>יחידת החיוב של GitHub. ‎1 AIU = קרדיט אחד = ‎$0.01</td></tr>
+  <tr><td><b>טוקן</b></td><td>יחידת טקסט של המודל, בערך 4 תווים. <b>גודל ≠ עלות</b> — תלוי אם הטוקן מגיע מה־cache</td></tr>
+  <tr><td><b>תור (turn)</b></td><td>סיבוב אחד בלולאת הסוכן: המודל מדבר → כלים רצים → התוצאות חוזרות</td></tr>
+  <tr><td><b>cache hit rate</b></td><td>איזה אחוז מהקלט הגיע מה־cache הזול. גבוה = זול. ‎0% = תור פתיחה (או cache שפג)</td></tr>
+  <tr><td><b>Payload</b></td><td>בטבלת הכלים: הארגומנטים שנשלחו + מה שהכלי החזיר (למשל תוכן הקובץ שנקרא)</td></tr>
+  <tr><td><b>extra model call</b></td><td>קריאה אוטומטית למודל צד זול (כותרת/סיווג). אגורות בודדות</td></tr>
+</table>
+
+<footer>
+  נוצר ע"י Token Coach · המספרים בדוגמה לקוחים מהלוגים האמיתיים שלך (8 ביוני 2026) ·
+  להמרה ל־PDF: פתח בדפדפן → הדפסה (⌘P) → "שמור כ־PDF"
+</footer>
+
+</main>
+</body>
+</html>

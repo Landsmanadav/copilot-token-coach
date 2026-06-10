@@ -2,7 +2,7 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "0.2.4",
+  "version": "0.4.2",
   "publisher": "nadavLan",
   "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
@@ -36,9 +36,14 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "tokenCoach.calibrate",
-        "title": "Token Coach: Calibrate $ to GitHub billing",
-        "icon": "$(settings-gear)"
+        "command": "tokenCoach.exportReport",
+        "title": "Token Coach: Export Report (Markdown)",
+        "icon": "$(save)"
+      },
+      {
+        "command": "tokenCoach.checkGitHubUsage",
+        "title": "Token Coach: Check GitHub credit usage (this month)",
+        "icon": "$(cloud-download)"
       }
     ],
     "configuration": {
@@ -88,6 +93,12 @@
           "default": 10000,
           "markdownDescription": "Flag a message when a single tool consumes more than this many milliseconds (summed across calls). Default `10000` (10s)."
         },
+        "tokenCoach.cacheIdleMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "markdownDescription": "Idle minutes after which the prompt cache is assumed to have expired. If a mid-chat message arrives after a longer pause **and** its cache reuse actually dropped, it's flagged as `cache-expired-idle`. The Claude (Anthropic) cache TTL is ~5 min (sliding); OpenAI's is ~5–10 min. Set `0` to disable idle detection."
+        },
         "tokenCoach.usdPerAiu": {
           "type": "number",
           "default": 0.01,
@@ -96,12 +107,17 @@
         "tokenCoach.planMonthlyUsd": {
           "type": "number",
           "default": 19,
-          "markdownDescription": "Your monthly Copilot plan price per user, used for the 'plan budget' gauge. Copilot **Business = $19**, **Enterprise / Pro+ = $39**. Each plan includes that many dollars of AI credits per month."
+          "markdownDescription": "Your monthly Copilot plan price per user (Copilot **Business = $19**, **Enterprise / Pro+ = $39**). Used only to tint the status bar when this month's spend gets large; the dashboard shows what you used, not a quota."
         },
         "tokenCoach.notifyOnExpensiveRequest": {
           "type": "boolean",
           "default": true,
           "markdownDescription": "Show a notification when a newly logged request exceeds the cost threshold."
+        },
+        "tokenCoach.notifyOnInefficiency": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show a gentle, throttled nudge when a new message shows an actionable inefficiency (cache went cold mid-chat, or open/attached files dominate context). At most one nudge every 5 minutes."
         },
         "tokenCoach.pollIntervalSeconds": {
           "type": "number",
@@ -113,6 +129,21 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Optional absolute path to a `workspaceStorage` directory. Useful for testing or non-standard installs. Leave empty to auto-detect the standard per-OS locations."
+        },
+        "tokenCoach.githubToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Fine-grained GitHub Personal Access Token with billing read access (the **Plan** account permission for personal usage, or **org billing read** if your seat is org-managed — see `tokenCoach.githubOrg`). Used by *Token Coach: Check GitHub credit usage* to read (read-only) your real Copilot credit consumption. Stored locally in your settings; used only when you run that command. Leave empty to be prompted."
+        },
+        "tokenCoach.githubUsername": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional GitHub username for the billing lookup. Leave empty to derive it from the token automatically."
+        },
+        "tokenCoach.githubOrg": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Organization login to read billing from when your Copilot seat is **billed through an org** (Copilot Business/Enterprise). GitHub's per-user billing endpoints can't see org-managed usage, so set this to hit `GET /organizations/{org}/settings/billing/usage` instead. Requires a token with org billing read access. Leave empty for personal (user-level) billing."
         }
       }
     }

@@ -72,6 +72,43 @@ So this tool surfaces:
 - **Live updates** — a file watcher (plus a backup poll) re-parses logs when
   Copilot writes new entries, and notifies you when a new request is expensive.
 
+### New in 0.3 — concepts ported from [Token Optimizer](https://github.com/alexgreensh/token-optimizer)
+
+Token Optimizer is a *Claude Code* plugin; it can't run on Copilot (which exposes
+no hooks to third parties), so these adapt its best ideas to Copilot's read-only
+debug logs:
+
+- **Efficiency grade (A–F)** — one glanceable health score = 60% cache reuse +
+  40% "clean runs" (messages with no real warning). Shown in the status bar
+  (which also tints **yellow/red** when efficiency is poor or you near/exceed your
+  plan budget), as a dashboard card, and as a **per-chat grade badge**.
+- **Model spend** — a per-model table of requests / tokens / cost, tagged
+  **billed** vs **included**, so you see where premium budget goes. A
+  `premium-overkill` coaching note flags small, billed turns a base (included)
+  model could have handled for free.
+- **Tool overhead (structural waste)** — parses the tool catalog Copilot ships on
+  every request and lists tools **defined but never called** — dead weight in your
+  cached prefix, the Copilot analog of "skills you installed but never invoke".
+- **Idle cache-expiry detection** — flags when a mid-chat message arrived after a
+  pause longer than the prompt-cache TTL (~5 min) *and* its cache reuse actually
+  dropped — i.e. the cache went cold from time alone, re-billing the whole context
+  at the full input rate. Shown as a **⏱ idle** chip on the message, a
+  `cache-expired-idle` warning (so it counts in the grade), and a real-time nudge.
+- **Proactive nudges** — a gentle, throttled notification (≤1 per 5 min) when a
+  new message shows an actionable inefficiency (cache went cold from idle/size, or
+  open files dominate context).
+- **Save / export** — *Token Coach: Export Report* writes a Markdown snapshot
+  (summary, efficiency, model spend, unused tools, top chats, trend) you can keep;
+  the extension also records a **daily efficiency trend** shown on the dashboard.
+- **Check GitHub credit usage** — the dashboard counts only what's in the local
+  debug logs, which are a *partial* record (other days/workspaces, and ask/inline
+  non-agent modes, aren't written here), so it normally reads lower than GitHub's
+  meter. *Token Coach: Check GitHub credit usage* reads your **real** monthly
+  credit total from GitHub's billing API (read-only, changes nothing) and shows it
+  next to the logged figure, so you can see how much your logs captured. Needs a
+  fine-grained PAT with billing read; set `tokenCoach.githubOrg` for org-managed
+  (Business/Enterprise) seats.
+
 ## 1. Enable Copilot debug logging
 
 The extension can only show data if Copilot is writing logs. In VS Code settings
@@ -147,11 +184,16 @@ code --install-extension token-coach-0.1.0.vsix
 | `tokenCoach.ioMinInputTokens` | `10000` | Minimum input before the tiny-output rule fires, so small side-calls aren't mislabelled "huge input". |
 | `tokenCoach.attachmentShareWarn` | `0.4` | Flag a message when open/attached files exceed this share of its logged context. |
 | `tokenCoach.slowToolWarnMs` | `10000` | Flag a message when one tool consumes more than this many ms (summed across calls). |
+| `tokenCoach.cacheIdleMinutes` | `5` | Idle minutes after which the prompt cache is assumed expired (Claude TTL ~5 min, OpenAI ~5–10 min). A mid-chat message after a longer pause whose cache reuse also dropped is flagged `cache-expired-idle`. `0` disables. |
 | `tokenCoach.usdPerAiu` | `0.01` | US dollars per 1 AIU (1 AI credit = $0.01, 1 AIU ≈ 1 credit). Set `0` to hide dollar figures. |
-| `tokenCoach.planMonthlyUsd` | `19` | Your monthly plan price (Business = $19, Enterprise/Pro+ = $39) for the budget gauge. |
+| `tokenCoach.planMonthlyUsd` | `19` | Your monthly plan price (Business = $19, Enterprise/Pro+ = $39). Only tints the status bar when spend gets large — no quota is shown. |
 | `tokenCoach.notifyOnExpensiveRequest` | `true` | Notify when a new request exceeds the cost threshold. |
+| `tokenCoach.notifyOnInefficiency` | `true` | Gentle, throttled nudge (≤1 / 5 min) on a new message's actionable inefficiency (cache cold mid-chat, heavy attachments). |
 | `tokenCoach.pollIntervalSeconds` | `20` | Backup poll interval; `0` disables polling. |
 | `tokenCoach.workspaceStoragePathOverride` | `""` | Optional explicit `workspaceStorage` path (testing / non-standard installs). |
+| `tokenCoach.githubToken` | `""` | Fine-grained PAT with billing read access, for *Check GitHub credit usage* (read-only). Used only on demand; empty ⇒ you're prompted. |
+| `tokenCoach.githubUsername` | `""` | Optional GitHub username for the billing lookup; empty ⇒ derived from the token. |
+| `tokenCoach.githubOrg` | `""` | Org login to read billing from for **org-managed** Copilot seats (per-user endpoints can't see org usage). Empty ⇒ personal billing. |
 
 ## Cost in dollars (credits)
 
@@ -161,21 +203,34 @@ credit = $0.01**, and each plan includes a monthly dollar allowance of credits
 credit ≈ $0.01** — e.g. a 0.66 AIU Haiku request (mostly cached input) works out
 to ≈ $0.0065 at real model rates, matching `0.66 × $0.01`.
 
-So the dashboard shows:
+So the dashboard leads with **how much you've used** — credits and dollars — over the
+**logged period**, with a banner stating the window your debug logs actually span
+(e.g. *"Jun 7 → Jun 8, 2026 · 2 days · 6 sessions"*). The figure is usage in that
+window only; no quota or plan denominator is shown.
 
-- **Dollar figures** next to AIU on each message and in the summary cards.
-- A **"Plan budget · this month"** gauge: this calendar month's estimated spend
-  vs your plan's allowance (the status bar tooltip shows the same).
+### Why the dashboard reads lower than GitHub's meter
 
-Both the rate (`usdPerAiu`) and plan price (`planMonthlyUsd`) are settings, so you
-can recalibrate. These are **estimates** for coaching, not a billing statement —
-your GitHub billing page is the source of truth. The estimate can differ from
-GitHub's % because (a) the real monthly allowance may include a *flex* amount on
-top of the plan price, and (b) some base-model usage isn't charged against
-credits. **To match GitHub exactly:** set `planMonthlyUsd` to your real monthly
-allowance, or scale `usdPerAiu` by `(GitHub's % ÷ the % shown here)` — e.g. if
-GitHub says 82% and the card shows 91%, set `usdPerAiu` to `0.01 × 82/91 ≈ 0.009`
-(or `planMonthlyUsd` to `19 × 91/82 ≈ 21`).
+Token Coach sums `copilotUsageNanoAiu` from Copilot's **local debug logs**, and each
+request's cost is exact — a gpt-5-mini turn with 10,642 new + 12,800 cached input +
+1,681 output computes to `0.63425` credits at GitHub's published rates
+(`$0.25 / $0.025 / $2.00` per 1M), which is what the log records, to the cent.
+
+But the logs are only a **partial record** of your month, so the total is lower than
+GitHub's meter:
+
+- **This machine only** — other devices, IDEs, and github.com/CLI usage aren't here.
+- **Agent debug log only** — ask/edit/inline Copilot Chat also spend credits but
+  aren't written to `agentDebugLog`.
+- **Only since you enabled logging**, only for workspaces you used it in, and logs
+  are **pruned by rotation** over time.
+
+This gap can't be fixed by reading the logs differently — the missing usage simply
+isn't on disk. (Tell-tale sign: the gap is a *different* ratio on each machine —
+e.g. `1.64×` on one, `1.99×` on another — so it's missing data, not a constant
+conversion error.) To see your **real** monthly total, run **Token Coach: Check
+GitHub credit usage** — it reads the authoritative figure from GitHub's billing API
+(read-only) and shows it next to what the logs captured. It can't read org-managed
+(Business/Enterprise) usage from a personal token — set `tokenCoach.githubOrg` for that.
 
 Sources: [GitHub Copilot is moving to usage-based billing](https://github.blog/news-insights/company-news/github-copilot-is-moving-to-usage-based-billing/) ·
 [Models and pricing for GitHub Copilot](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing) ·
@@ -187,11 +242,13 @@ Sources: [GitHub Copilot is moving to usage-based billing](https://github.blog/n
 | --- | --- | --- |
 | Expensive request | `cost > costWarnThreshold` | Split the task into smaller, focused steps. |
 | Cold start (info) | first message of a chat with low aggregate cache | None needed — the cache is cold on the first message; staying in the chat reuses it next turn. |
-| Low cache hit | a **later** message (not the first) with large input and `cacheHitRate < lowCacheRateThreshold` | The chat likely outgrew the cache window or its context changed; for a new task, a fresh focused chat can be cheaper. |
+| Cache expired (idle) | a **later** message that arrived after a gap ≥ `cacheIdleMinutes` **and** whose cache reuse actually dropped | The prompt cache (TTL ~5 min, sliding) expired during the pause, so the whole context was re-billed at the full input rate. Keep a thread warm (next message within ~5 min) or batch related questions. |
+| Low cache hit | a **later** message (not the first) with large input and low cache, **not** explained by idle time | The chat likely outgrew the cache window or its context changed; for a new task, a fresh focused chat can be cheaper. |
 | Large input | `inputTokens > inputWarnThreshold` | Close irrelevant files/tabs to shrink context. |
 | Tiny output | `inputTokens > ioMinInputTokens` **and** `inputTokens / outputTokens > ioRatioThreshold` | Reconsider whether agent mode / full context was needed. |
 | Heavy attachments | attachments > `attachmentShareWarn` of logged context | Close unused editors/tabs — open files are bloating context. |
 | Slow tool | one tool's total time > `slowToolWarnMs` | Heavy tool use lengthens turns and grows context. |
+| Premium overkill (info) | a small (`<8K` input), tool-free, single-turn message that was **billed** (`cost > 0`) | A base model (GPT-4.1 / GPT-4o, included in your plan) would likely have done it for free — use the model picker for quick edits & questions. |
 
 ## Project structure
 
@@ -200,10 +257,13 @@ token-coach/
 ├── package.json      # manifest: commands, settings, activation
 ├── tsconfig.json
 ├── src/
-│   ├── extension.ts  # activate/deactivate, status bar, watcher, commands
-│   ├── logParser.ts  # find + parse jsonl
-│   ├── coach.ts      # rules engine
-│   └── dashboard.ts  # webview HTML + update logic
+│   ├── extension.ts     # activate/deactivate, status bar, watcher, commands, history
+│   ├── logParser.ts     # find + parse jsonl, tool inventory
+│   ├── coach.ts         # rules engine
+│   ├── efficiency.ts    # A–F efficiency grade (all-time + per-chat)
+│   ├── dashboard.ts     # webview HTML + update logic
+│   ├── report.ts        # Markdown export + daily-trend snapshot type
+│   └── githubBilling.ts # GitHub enhanced-billing usage API (read-only credit check)
 └── README.md
 ```
 

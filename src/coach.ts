@@ -43,8 +43,13 @@ export interface CoachConfig {
   slowToolWarnMs: number;
   /** US dollars per 1 AIU (GitHub: 1 AI credit = $0.01, 1 AIU ≈ 1 credit). 0 hides $. */
   usdPerAiu: number;
-  /** Monthly plan price per user (Copilot Business = $19), for the budget gauge. */
+  /** Monthly plan price per user (Copilot Business = $19). Kept for status-bar tinting. */
   planMonthlyUsd: number;
+  /**
+   * Idle minutes after which the prompt cache is assumed to have expired. The
+   * Claude (Anthropic) cache TTL is ~5 min (sliding); OpenAI's is ~5–10 min.
+   */
+  cacheIdleMinutes: number;
 }
 
 /** Sensible defaults, mirroring the values declared in package.json. */
@@ -59,10 +64,26 @@ export const DEFAULT_COACH_CONFIG: CoachConfig = {
   slowToolWarnMs: 10_000,
   usdPerAiu: 0.01,
   planMonthlyUsd: 19,
+  cacheIdleMinutes: 5,
 };
 
 /** Rough chars→tokens estimate. Context payload sizes are measured in chars. */
 const CHARS_PER_TOKEN = 4;
+
+/**
+ * A turn this small, with no tools and a single agent turn, is a quick edit or
+ * Q&A — the kind a base (included) model handles fine. Above it, premium may be
+ * justified, so we don't nag.
+ */
+const PREMIUM_TRIVIAL_MAX_INPUT = 8000;
+
+/** Friendly idle-gap label from a count of minutes: "12 min", "1.5 h". */
+function formatGapMinutes(mins: number): string {
+  if (mins >= 90) {
+    return `${(mins / 60).toFixed(1)} h`;
+  }
+  return `${mins} min`;
+}
 
 /**
  * Evaluate every rule against a single request.
@@ -148,6 +169,13 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
     group.totalInputTokens > config.lowCacheMinInputTokens &&
     group.cacheHitRate < config.lowCacheRateThreshold;
 
+  // Did enough idle time pass before this message to expire the prompt cache?
+  // We have the real cache numbers, so we only blame idle when cache *also*
+  // actually dropped — no false positives from a gap that stayed warm.
+  const cacheIdleMs = Math.max(0, config.cacheIdleMinutes) * 60_000;
+  const idleGap = group.idleGapMsBefore ?? 0;
+  const idleExpired = !isFirstInChat && cacheIdleMs > 0 && idleGap >= cacheIdleMs;
+
   if (cacheLow && isFirstInChat) {
     warnings.push({
       rule: 'cold-start',
@@ -155,6 +183,16 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       message:
         'First message of the chat — caching starts cold, so low reuse here is expected. ' +
         'Staying in this chat reuses the cache (and lowers cost) on later turns.',
+    });
+  } else if (cacheLow && idleExpired) {
+    const mins = Math.round(idleGap / 60_000);
+    warnings.push({
+      rule: 'cache-expired-idle',
+      level: 'warning',
+      message:
+        `Cache went cold after a ~${formatGapMinutes(mins)} pause — past the ~5 min prompt-cache window, so ` +
+        `the cached context expired and was re-billed at the full (much higher) input rate this turn. ` +
+        `Keep a thread warm by sending the next message within ~5 min, or batch related questions together.`,
     });
   } else if (cacheLow) {
     warnings.push({
@@ -191,6 +229,27 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       message:
         `Open/attached files are ~${share}% of the logged context` +
         `${n ? ` (${n} file${n === 1 ? '' : 's'}, ≈${Math.round(attachTokens).toLocaleString()} tok)` : ''} — close unused editors/tabs.`,
+    });
+  }
+
+  // Premium (billed) model used for a tiny, tool-free, single-turn ask — a base
+  // model included in the plan would very likely have done it for $0. cost > 0
+  // is Copilot's own signal that the request consumed premium budget.
+  if (
+    group.totalCostNanoAiu > 0 &&
+    group.totalInputTokens < PREMIUM_TRIVIAL_MAX_INPUT &&
+    group.toolCalls.length === 0 &&
+    group.turnCount <= 1
+  ) {
+    const model =
+      Object.entries(group.modelCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'a premium model';
+    warnings.push({
+      rule: 'premium-overkill',
+      level: 'info',
+      message:
+        `Small, billed turn on ${model} (≈${Math.round(group.totalInputTokens / 1000)}k tok, no tools) — ` +
+        `base models (e.g. GPT-4.1 / GPT-4o) are included in your plan. Pick one from the model dropdown for ` +
+        `quick edits & questions to save premium budget.`,
     });
   }
 

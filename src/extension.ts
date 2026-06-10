@@ -10,13 +10,23 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { loadAll, findExistingStorageBases, LlmRequestRecord, ParsedData } from './logParser';
-import { analyzeRecord, CoachConfig, DEFAULT_COACH_CONFIG } from './coach';
+import {
+  loadAll,
+  findExistingStorageBases,
+  groupByChat,
+  ChatGroup,
+  MessageGroup,
+  LlmRequestRecord,
+  ParsedData,
+} from './logParser';
+import { analyzeRecord, analyzeMessageDrivers, CoachConfig, CoachWarning, DEFAULT_COACH_CONFIG } from './coach';
+import { computeEfficiency, EfficiencyScore } from './efficiency';
+import { buildMarkdownReport, DailySnapshot } from './report';
+import { fetchCopilotMonthUsage, fetchGitHubLogin } from './githubBilling';
 import {
   DashboardPanel,
   formatCost,
-  formatTokens,
-  formatTokensCompact,
+  formatCredits,
   formatUsd,
   setExtensionVersion,
 } from './dashboard';
@@ -33,11 +43,29 @@ let refreshDebounce: NodeJS.Timeout | undefined;
  * not just the standard per-OS location. Computed once in activate().
  */
 let workspaceStorageBase = '';
+/** Kept so history (globalState) and the export command can reach extension storage. */
+let extensionContext: vscode.ExtensionContext;
 
-/** Ids of requests we've already seen, so we only notify about genuinely new ones. */
-const seenIds = new Set<string>();
+const HISTORY_KEY = 'tokenCoach.history';
+/** Throttle history writes — refresh runs often, but a daily snapshot needn't. */
+let lastSnapshotMs = 0;
+const SNAPSHOT_MIN_GAP_MS = 10 * 60 * 1000;
+
+/** Ids of requests we've already seen, so we only notify about genuinely new ones.
+ *  Rebuilt from the (month-scoped) data each pass, so it stays bounded. */
+let seenIds = new Set<string>();
 /** Suppress notifications during the very first load (historical data). */
 let primed = false;
+
+/** Message ids already seen, so inefficiency nudges fire once per new message.
+ *  Rebuilt from the (month-scoped) data each pass, so it stays bounded. */
+let seenMessageIds = new Set<string>();
+/** Suppress inefficiency nudges on the first load (historical data). */
+let nudgePrimed = false;
+/** Timestamp of the last notification, so softer nudges don't stack on alerts. */
+let lastNudgeMs = 0;
+/** Minimum gap between inefficiency nudges, so they coach rather than nag. */
+const NUDGE_COOLDOWN_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -56,6 +84,7 @@ function getCoachConfig(): CoachConfig {
     slowToolWarnMs: cfg.get('slowToolWarnMs', DEFAULT_COACH_CONFIG.slowToolWarnMs),
     usdPerAiu: cfg.get('usdPerAiu', DEFAULT_COACH_CONFIG.usdPerAiu),
     planMonthlyUsd: cfg.get('planMonthlyUsd', DEFAULT_COACH_CONFIG.planMonthlyUsd),
+    cacheIdleMinutes: cfg.get('cacheIdleMinutes', DEFAULT_COACH_CONFIG.cacheIdleMinutes),
   };
 }
 
@@ -77,60 +106,155 @@ function startOfMonthMs(): number {
   return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 }
 
-function updateStatusBar(records: LlmRequestRecord[], config: CoachConfig): void {
-  const todayStart = startOfTodayMs();
+/**
+ * Keep only this calendar month's records. Every consumer (status bar,
+ * dashboard, nudges, exported report) sees a month-scoped view, so on the 1st
+ * of each month the extension starts fresh — matching GitHub's monthly credit
+ * reset. Older logs stay on disk untouched; they're just not shown.
+ */
+function filterToCurrentMonth(data: ParsedData): ParsedData {
   const monthStart = startOfMonthMs();
-  // Accumulate three scopes so the status bar can show the (always-meaningful)
-  // all-time total while the tooltip breaks it down by today / this month.
-  let allCost = 0;
-  let allTokens = 0;
+  return {
+    ...data,
+    requests: data.requests.filter((r) => r.timestamp >= monthStart),
+    toolCalls: data.toolCalls.filter((t) => t.timestamp >= monthStart),
+  };
+}
+
+function updateStatusBar(data: ParsedData, config: CoachConfig, hasOlderLogs = false): void {
+  const records = data.requests;
+  const todayStart = startOfTodayMs();
+  // Data is already month-scoped (filterToCurrentMonth), so the sum of all
+  // records IS this month's cost. The tooltip breaks it down by month / today.
+  // (Token counts are intentionally not shown.)
   let monthCost = 0;
   let todayCost = 0;
-  let todayTokens = 0;
   for (const r of records) {
-    const t = r.inputTokens + r.outputTokens;
-    allCost += r.costNanoAiu;
-    allTokens += t;
-    if (r.timestamp >= monthStart) {
-      monthCost += r.costNanoAiu;
-    }
+    monthCost += r.costNanoAiu;
     if (r.timestamp >= todayStart) {
       todayCost += r.costNanoAiu;
-      todayTokens += t;
     }
   }
 
   const showUsd = config.usdPerAiu > 0;
 
   if (records.length === 0) {
-    statusBarItem.text = '$(graph) Token Coach: no logs';
-    statusBarItem.tooltip =
-      'No Copilot debug logs found. Enable github.copilot.chat.agentDebugLog.enabled and ' +
-      '...fileLogging.enabled, then use Copilot Chat. Click to open the dashboard.';
-  } else {
-    // Show the all-time total — it always reflects the data on disk, so the bar
-    // never looks empty just because Copilot wasn't used *today*.
-    const usdTag = showUsd ? ` · ~${formatUsd(allCost, config.usdPerAiu)}` : '';
-    statusBarItem.text = `$(graph) ${formatCost(allCost)}${usdTag} · ${formatTokensCompact(allTokens)} tok`;
-
-    const lines = [
-      `Token Coach`,
-      `All-time: ${formatCost(allCost)}${showUsd ? ` (≈ ${formatUsd(allCost, config.usdPerAiu)})` : ''} · ${formatTokens(allTokens)} tok`,
-    ];
-    if (showUsd && config.planMonthlyUsd > 0) {
-      const monthUsd = (monthCost / 1e9) * config.usdPerAiu;
-      const pct = Math.round((monthUsd / config.planMonthlyUsd) * 100);
-      lines.push(
-        `This month: ${formatUsd(monthCost, config.usdPerAiu)} of $${config.planMonthlyUsd.toFixed(0)} plan (${pct}%)`
+    // Distinguish "fresh month, nothing used yet" (older logs exist but are
+    // outside the current month) from "logging not set up at all".
+    if (hasOlderLogs) {
+      statusBarItem.text = `$(graph) ${showUsd ? formatUsd(0, config.usdPerAiu) : formatCost(0)} used`;
+      statusBarItem.backgroundColor = undefined;
+      const md = new vscode.MarkdownString(
+        '**$(graph) Token Coach** — new month, fresh start.\n\n' +
+          'No Copilot usage logged this month yet. The counter resets on the 1st, like GitHub\'s credit meter.\n\n' +
+          '[Open dashboard](command:tokenCoach.showDashboard)'
       );
+      md.isTrusted = true;
+      md.supportThemeIcons = true;
+      statusBarItem.tooltip = md;
+      statusBarItem.show();
+      return;
     }
-    lines.push(
-      `Today: ${formatCost(todayCost)}${showUsd ? ` (≈ ${formatUsd(todayCost, config.usdPerAiu)})` : ''} · ${formatTokens(todayTokens)} tok`
+    statusBarItem.text = '$(graph) Token Coach: no logs';
+    statusBarItem.backgroundColor = undefined;
+    const md = new vscode.MarkdownString(
+      'No Copilot debug logs found yet.\n\n' +
+        'Enable `github.copilot.chat.agentDebugLog.enabled` and `…fileLogging.enabled`, then use Copilot Chat.\n\n' +
+        '[Open dashboard](command:tokenCoach.showDashboard)'
     );
-    lines.push(`${records.length.toLocaleString()} requests on disk · click to open the dashboard.`);
-    statusBarItem.tooltip = lines.join('\n');
+    md.isTrusted = true;
+    md.supportThemeIcons = true;
+    statusBarItem.tooltip = md;
+    statusBarItem.show();
+    return;
   }
+
+  // Single glanceable health signal, computed from the same coaching rules the
+  // dashboard uses (cache reuse + waste warnings).
+  const eff = computeEfficiency(data, config);
+  const monthUsd = (monthCost / 1e9) * config.usdPerAiu;
+
+  // Lead with "how much you've used this month" — the figure that maps to
+  // GitHub's monthly credit meter (it resets each month, just like GitHub).
+  // The all-time total and token breakdown move to the tooltip.
+  const gradeTag = eff.hasData ? `${eff.grade} · ` : '';
+  const usedTag = showUsd ? `${formatUsd(monthCost, config.usdPerAiu)} used` : `${formatCost(monthCost)} used`;
+  statusBarItem.text = `$(graph) ${gradeTag}${usedTag}`;
+  statusBarItem.backgroundColor = statusBarColor(eff, monthUsd, config);
+  statusBarItem.tooltip = buildStatusTooltip(
+    { eff, monthCost, todayCost, recordCount: records.length },
+    config
+  );
   statusBarItem.show();
+}
+
+/**
+ * Tint the status bar to flag trouble at a glance. Status bar items only support
+ * warning/error theme backgrounds, so we map: poor efficiency OR over budget →
+ * red; mediocre efficiency OR nearing budget → yellow; otherwise the default.
+ */
+function statusBarColor(
+  eff: EfficiencyScore,
+  monthUsd: number,
+  config: CoachConfig
+): vscode.ThemeColor | undefined {
+  const budgetTracked = config.usdPerAiu > 0 && config.planMonthlyUsd > 0;
+  const overBudget = budgetTracked && monthUsd > config.planMonthlyUsd;
+  const nearBudget = budgetTracked && monthUsd >= 0.8 * config.planMonthlyUsd;
+
+  if ((eff.hasData && eff.score < 50) || overBudget) {
+    return new vscode.ThemeColor('statusBarItem.errorBackground');
+  }
+  if ((eff.hasData && eff.score < 70) || nearBudget) {
+    return new vscode.ThemeColor('statusBarItem.warningBackground');
+  }
+  return undefined;
+}
+
+interface TooltipStats {
+  eff: EfficiencyScore;
+  monthCost: number;
+  todayCost: number;
+  recordCount: number;
+}
+
+/** Rich, clickable Markdown tooltip (replaces the old plain-text one). */
+function buildStatusTooltip(s: TooltipStats, config: CoachConfig): vscode.MarkdownString {
+  const showUsd = config.usdPerAiu > 0;
+  const usd = (nano: number) => formatUsd(nano, config.usdPerAiu);
+  const blocks: string[] = [];
+
+  if (s.eff.hasData) {
+    blocks.push(
+      `**$(graph) Token Coach** — Efficiency **${s.eff.grade}** · ${s.eff.score}/100\n\n` +
+        `Cache reuse ${s.eff.cacheScore}/100 · Clean runs ${s.eff.cleanScore}/100 ` +
+        `_(${s.eff.cleanMessages}/${s.eff.messageCount} messages)_`
+    );
+  } else {
+    blocks.push(`**$(graph) Token Coach**`);
+  }
+
+  // "How much you used" by scope — just the credits you spent, no plan/quota.
+  const line = (label: string, nano: number) =>
+    `**${label}** ${formatCredits(nano)}${showUsd ? ` (${usd(nano)})` : ''}`;
+  const stats = [line('This month', s.monthCost), line('Today', s.todayCost)];
+  // Two trailing spaces = a soft line break, so the stats stack tightly.
+  blocks.push(stats.join('  \n'));
+
+  blocks.push(
+    `${s.recordCount.toLocaleString()} requests logged this month — resets on the 1st, like GitHub's meter. ` +
+      `A partial record; “Check GitHub credit usage” shows your real monthly total.`
+  );
+  blocks.push(
+    `[Open dashboard](command:tokenCoach.showDashboard) · ` +
+      `[Check GitHub](command:tokenCoach.checkGitHubUsage) · ` +
+      `[Refresh](command:tokenCoach.refresh)`
+  );
+
+  const md = new vscode.MarkdownString(blocks.join('\n\n'));
+  md.isTrusted = true; // enable command: links
+  md.supportThemeIcons = true;
+  return md;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,14 +270,19 @@ async function refresh(): Promise<void> {
     console.error('[Token Coach] Failed to load logs:', err);
     data = { requests: [], toolCalls: [], titles: {} };
   }
+  // Month scope: everything shown resets automatically when a new month starts.
+  const totalLogged = data.requests.length;
+  data = filterToCurrentMonth(data);
 
-  updateStatusBar(data.requests, config);
+  updateStatusBar(data, config, totalLogged > data.requests.length);
 
   if (DashboardPanel.current) {
-    DashboardPanel.current.update(data, config);
+    DashboardPanel.current.update(data, config, getHistory());
   }
 
   detectAndNotifyNew(data.requests, config);
+  detectAndNotifyNudges(groupByChat(data), config);
+  void recordSnapshot(data, config);
 }
 
 /**
@@ -163,16 +292,20 @@ async function refresh(): Promise<void> {
 function detectAndNotifyNew(records: LlmRequestRecord[], config: CoachConfig): void {
   const notify = vscode.workspace.getConfiguration(CONFIG_SECTION).get('notifyOnExpensiveRequest', true);
 
+  const current = new Set<string>();
   const newExpensive: LlmRequestRecord[] = [];
   for (const r of records) {
+    current.add(r.id);
     if (seenIds.has(r.id)) {
       continue;
     }
-    seenIds.add(r.id);
     if (primed && r.costNanoAiu > config.costWarnThreshold) {
       newExpensive.push(r);
     }
   }
+  // Replace rather than accumulate: ids that fell out of the month-scoped data
+  // can never reappear, so this keeps the set bounded across months.
+  seenIds = current;
 
   if (!primed) {
     primed = true;
@@ -187,6 +320,8 @@ function detectAndNotifyNew(records: LlmRequestRecord[], config: CoachConfig): v
     const advice = analyzeRecord(worst, config)
       .map((w) => w.message)
       .join(' ');
+    // A cost alert takes priority, so let it suppress softer nudges for a while.
+    lastNudgeMs = Date.now();
     vscode.window
       .showWarningMessage(
         `Expensive Copilot request: ${formatCost(worst.costNanoAiu)} on ${worst.model}${extra}. ${advice}`,
@@ -198,6 +333,67 @@ function detectAndNotifyNew(records: LlmRequestRecord[], config: CoachConfig): v
         }
       });
   }
+}
+
+/**
+ * Softer, message-level coaching: when a genuinely-new message shows an
+ * actionable inefficiency (cache went cold mid-chat, or open files dominate
+ * context), nudge once — throttled so it coaches rather than nags.
+ */
+function detectAndNotifyNudges(chats: ChatGroup[], config: CoachConfig): void {
+  // Record every new message first (so we never nudge twice for the same one),
+  // and collect the fresh ones to consider.
+  const current = new Set<string>();
+  const fresh: MessageGroup[] = [];
+  for (const chat of chats) {
+    for (const g of chat.messages) {
+      current.add(g.id);
+      if (seenMessageIds.has(g.id)) {
+        continue;
+      }
+      fresh.push(g);
+    }
+  }
+  // Replace rather than accumulate (same reasoning as seenIds): stays bounded.
+  seenMessageIds = current;
+
+  // First load just primes the seen-set so we don't nudge on historical data.
+  if (!nudgePrimed) {
+    nudgePrimed = true;
+    return;
+  }
+
+  const notify = vscode.workspace.getConfiguration(CONFIG_SECTION).get('notifyOnInefficiency', true);
+  if (!notify || fresh.length === 0) {
+    return;
+  }
+  if (Date.now() - lastNudgeMs < NUDGE_COOLDOWN_MS) {
+    return;
+  }
+
+  // Only the actionable drivers are worth interrupting for.
+  const ACTIONABLE = new Set(['cache-expired-idle', 'low-cache-hit', 'heavy-attachments']);
+  const candidates: Array<{ group: MessageGroup; warning: CoachWarning }> = [];
+  for (const g of fresh) {
+    const w = analyzeMessageDrivers(g, config).find((d) => ACTIONABLE.has(d.rule));
+    if (w) {
+      candidates.push({ group: g, warning: w });
+    }
+  }
+  if (candidates.length === 0) {
+    return;
+  }
+
+  candidates.sort((a, b) => b.group.startTime - a.group.startTime);
+  const top = candidates[0];
+  lastNudgeMs = Date.now();
+  vscode.window
+    .showInformationMessage(`Token Coach: ${top.warning.message}`, 'Open Dashboard')
+    .then((choice) => {
+      if (choice === 'Open Dashboard') {
+        void showDashboard();
+      }
+    });
 }
 
 /** Debounced refresh, used by watchers that can fire in rapid bursts. */
@@ -214,89 +410,192 @@ function scheduleRefresh(): void {
 
 async function showDashboard(): Promise<void> {
   const config = getCoachConfig();
-  const data = await loadAll(getOverridePath(), workspaceStorageBase);
-  // Keep the seen-set in sync so opening the dashboard doesn't re-trigger alerts.
+  const raw = await loadAll(getOverridePath(), workspaceStorageBase);
+  const data = filterToCurrentMonth(raw);
+  // Keep the seen-sets in sync so opening the dashboard doesn't re-trigger alerts.
   for (const r of data.requests) {
     seenIds.add(r.id);
   }
+  for (const chat of groupByChat(data)) {
+    for (const g of chat.messages) {
+      seenMessageIds.add(g.id);
+    }
+  }
   primed = true;
-  DashboardPanel.createOrShow(data, config, () => void refresh());
-  updateStatusBar(data.requests, config);
+  nudgePrimed = true;
+  await recordSnapshot(data, config);
+  DashboardPanel.createOrShow(data, config, () => void refresh(), getHistory());
+  updateStatusBar(data, config, raw.requests.length > data.requests.length);
+}
+
+/** Sum this month's RAW (un-scaled) logged AIU. The basis for the scale factor. */
+/**
+ * Read this month's REAL Copilot credit usage from GitHub and show it next to
+ * what the local logs captured — read-only, it changes nothing on the dashboard.
+ * Copilot's debug logs are only a partial record (sessions from other
+ * days/workspaces, and ask/inline modes, aren't written here), so the logged
+ * total is normally lower than GitHub's meter; this surfaces the true figure
+ * without faking anything. Needs a fine-grained PAT with billing read access;
+ * for org-managed (Business/Enterprise) seats set `tokenCoach.githubOrg`.
+ */
+async function checkGitHubUsage(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+
+  let token = cfg.get<string>('githubToken', '').trim();
+  if (!token) {
+    const entered = await vscode.window.showInputBox({
+      title: 'GitHub billing — fine-grained token',
+      prompt:
+        'Paste a fine-grained Personal Access Token with billing read access (the "Plan" account ' +
+        'permission for personal usage, or org billing read if your Copilot seat is org-managed). ' +
+        'Saved to your settings (tokenCoach.githubToken).',
+      password: true,
+      ignoreFocusOut: true,
+    });
+    if (!entered) {
+      return;
+    }
+    token = entered.trim();
+    await cfg.update('githubToken', token, vscode.ConfigurationTarget.Global);
+  }
+
+  const org = cfg.get<string>('githubOrg', '').trim();
+
+  // What our local logs captured this month, for an honest side-by-side.
+  const data = await loadAll(getOverridePath(), workspaceStorageBase);
+  const monthStart = startOfMonthMs();
+  let loggedCredits = 0;
+  for (const r of data.requests) {
+    if (r.timestamp >= monthStart) {
+      loggedCredits += r.costNanoAiu / 1e9;
+    }
+  }
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Token Coach: reading GitHub billing…' },
+    async () => {
+      try {
+        const account = org
+          ? { org }
+          : { username: cfg.get<string>('githubUsername', '').trim() || (await fetchGitHubLogin(token)) };
+        const now = new Date();
+        const usage = await fetchCopilotMonthUsage(token, account, now.getFullYear(), now.getMonth() + 1);
+        const who = org ? `org ${org}` : account.username;
+        if (usage.grossCredits <= 0) {
+          vscode.window.showInformationMessage(
+            `Token Coach: GitHub reports 0 Copilot credits used this month for ${who}. ` +
+              (org ? '' : 'If your seat is billed through an organization, set tokenCoach.githubOrg.')
+          );
+          return;
+        }
+        const captured = loggedCredits > 0 ? Math.round((loggedCredits / usage.grossCredits) * 100) : 0;
+        vscode.window.showInformationMessage(
+          `GitHub: ${usage.grossCredits.toFixed(1)} credits used this month ($${(usage.grossCredits * 0.01).toFixed(2)}). ` +
+            `These local logs captured ${loggedCredits.toFixed(1)} (${captured}%) — the rest is Copilot usage not ` +
+            `written to this machine's agent debug logs (other days/workspaces, or ask/inline modes).`
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Token Coach: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// History + export ("saving things")
+// ---------------------------------------------------------------------------
+
+/** Local `YYYY-MM-DD` for grouping daily snapshots. */
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function getHistory(): DailySnapshot[] {
+  return extensionContext?.globalState.get<DailySnapshot[]>(HISTORY_KEY, []) ?? [];
 }
 
 /**
- * Anchor our dollar estimate to GitHub's authoritative billing number. The user
- * reads what GitHub actually shows used THIS MONTH (a $ amount is best — it's
- * unambiguous; a % is accepted but assumes the configured allowance), and we
- * rescale `usdPerAiu` so our figure matches. This closes the systematic gap
- * (flex allowance + uncharged base-model usage) in one step.
+ * Record (or update) today's snapshot of the headline numbers, so the dashboard
+ * and exported report can show a trend over time. Throttled, and only one entry
+ * per calendar day (re-written as the day's totals grow).
  */
-async function calibrateToGitHub(): Promise<void> {
-  const config = getCoachConfig();
-  if (config.usdPerAiu <= 0) {
-    vscode.window.showWarningMessage(
-      'Token Coach: dollar estimates are disabled (usdPerAiu = 0). Set it to ~0.01 first, then calibrate.'
-    );
+async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<void> {
+  if (!extensionContext || data.requests.length === 0) {
     return;
   }
+  const now = Date.now();
+  const date = localDateKey(new Date());
+  const history = getHistory();
+  const last = history[history.length - 1];
+  // Skip frequent rewrites unless it's a new day or enough time has passed.
+  if (last && last.date === date && now - lastSnapshotMs < SNAPSHOT_MIN_GAP_MS) {
+    return;
+  }
+  lastSnapshotMs = now;
 
-  const data = await loadAll(getOverridePath(), workspaceStorageBase);
-  const monthStart = startOfMonthMs();
-  let monthCostNano = 0;
+  // Data is month-scoped, so the sum of all records is this month's cost.
+  let monthCost = 0;
+  let totalTokens = 0;
   for (const r of data.requests) {
-    if (r.timestamp >= monthStart) {
-      monthCostNano += r.costNanoAiu;
-    }
+    monthCost += r.costNanoAiu;
+    totalTokens += r.inputTokens + r.outputTokens;
   }
-  const ourUsd = (monthCostNano / 1e9) * config.usdPerAiu;
-  if (ourUsd <= 0) {
-    vscode.window.showWarningMessage('Token Coach: no usage recorded this month to calibrate against.');
-    return;
-  }
+  const eff = computeEfficiency(data, config);
+  const snap: DailySnapshot = {
+    date,
+    score: eff.score,
+    grade: eff.grade,
+    allCostNanoAiu: monthCost,
+    monthCostNanoAiu: monthCost,
+    totalTokens,
+  };
 
-  const input = await vscode.window.showInputBox({
-    title: 'Calibrate to GitHub billing',
-    prompt:
-      `We estimate $${ourUsd.toFixed(2)} used this month. Open your GitHub usage page and enter what it ` +
-      `actually shows for THIS MONTH — a $ amount (best, e.g. 15.58) or a percentage (e.g. 82%).`,
-    placeHolder: 'e.g. 15.58   or   82%',
-    ignoreFocusOut: true,
-  });
-  if (!input) {
-    return;
-  }
-
-  const trimmed = input.trim();
-  let targetUsd: number;
-  if (trimmed.endsWith('%')) {
-    const pct = parseFloat(trimmed.slice(0, -1));
-    if (!isFinite(pct)) {
-      vscode.window.showErrorMessage('Token Coach: could not read that percentage.');
-      return;
-    }
-    targetUsd = (pct / 100) * config.planMonthlyUsd;
+  if (last && last.date === date) {
+    history[history.length - 1] = snap;
   } else {
-    targetUsd = parseFloat(trimmed.replace(/[$,\s]/g, ''));
-    if (!isFinite(targetUsd)) {
-      vscode.window.showErrorMessage('Token Coach: could not read that amount.');
-      return;
-    }
+    history.push(snap);
   }
-  if (targetUsd <= 0) {
-    vscode.window.showErrorMessage('Token Coach: the calibration target must be greater than 0.');
+  if (history.length > 365) {
+    history.splice(0, history.length - 365);
+  }
+  await extensionContext.globalState.update(HISTORY_KEY, history);
+}
+
+/** Build a Markdown report and let the user save it, then open it. */
+async function exportReport(): Promise<void> {
+  const config = getCoachConfig();
+  const data = filterToCurrentMonth(await loadAll(getOverridePath(), workspaceStorageBase));
+  if (data.requests.length === 0) {
+    vscode.window.showWarningMessage('Token Coach: no Copilot usage logged this month — nothing to export.');
+    return;
+  }
+  const md = buildMarkdownReport(data, config, getHistory(), new Date());
+
+  const defaultName = `token-coach-report-${localDateKey(new Date())}.md`;
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const defaultUri = folder ? vscode.Uri.joinPath(folder, defaultName) : vscode.Uri.file(defaultName);
+  const target = await vscode.window.showSaveDialog({
+    title: 'Export Token Coach report',
+    defaultUri,
+    filters: { Markdown: ['md'], 'All files': ['*'] },
+  });
+  if (!target) {
     return;
   }
 
-  const newRate = Number((config.usdPerAiu * (targetUsd / ourUsd)).toFixed(6));
-  await vscode.workspace
-    .getConfiguration(CONFIG_SECTION)
-    .update('usdPerAiu', newRate, vscode.ConfigurationTarget.Global);
-
-  vscode.window.showInformationMessage(
-    `Token Coach calibrated: 1 AIU ≈ $${newRate} (was $${config.usdPerAiu}). This month now ≈ $${targetUsd.toFixed(2)}. ` +
-      `If the % still differs, set "tokenCoach.planMonthlyUsd" to your real monthly allowance (base + flex).`
-  );
-  await refresh();
+  try {
+    await vscode.workspace.fs.writeFile(target, Buffer.from(md, 'utf8'));
+  } catch (err) {
+    vscode.window.showErrorMessage(`Token Coach: could not write the report — ${String(err)}`);
+    return;
+  }
+  const doc = await vscode.workspace.openTextDocument(target);
+  await vscode.window.showTextDocument(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +660,7 @@ function deriveWorkspaceStorageBase(context: vscode.ExtensionContext): string {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionContext = context;
   setExtensionVersion(String(context.extension.packageJSON.version ?? ''));
   workspaceStorageBase = deriveWorkspaceStorageBase(context);
   console.log('[Token Coach] workspaceStorage base:', workspaceStorageBase || '(derive failed; using OS defaults)');
@@ -372,7 +672,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('tokenCoach.showDashboard', () => void showDashboard()),
     vscode.commands.registerCommand('tokenCoach.refresh', () => void refresh()),
-    vscode.commands.registerCommand('tokenCoach.calibrate', () => void calibrateToGitHub())
+    vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport()),
+    vscode.commands.registerCommand('tokenCoach.checkGitHubUsage', () => void checkGitHubUsage())
   );
 
   // React to relevant settings changes: re-read thresholds, restart watchers /

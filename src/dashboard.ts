@@ -19,6 +19,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import {
   LlmRequestRecord,
   MessageGroup,
@@ -26,9 +27,10 @@ import {
   ToolCallRecord,
   ToolSummary,
   ContextSource,
-  AttachmentInfo,
   ParsedData,
+  ToolInventory,
   groupByChat,
+  analyzeToolInventory,
 } from './logParser';
 import {
   analyzeRecord,
@@ -39,6 +41,8 @@ import {
   highestLevel,
   WarningLevel,
 } from './coach';
+import { computeEfficiencyFromChats, computeChatEfficiency, EfficiencyScore } from './efficiency';
+import type { DailySnapshot } from './report';
 
 // ---------------------------------------------------------------------------
 // Formatting helpers (exported so the status bar can reuse them).
@@ -47,6 +51,11 @@ import {
 /** 1e9 NanoAiu == 1 AIU. Display cost in AIU, which is far more readable. */
 export function formatCost(nanoAiu: number): string {
   return `${(nanoAiu / 1e9).toFixed(2)} AIU`;
+}
+
+/** Same magnitude as AIU, labelled as GitHub "credits" (1 credit = 1 AIU = $0.01). */
+export function formatCredits(nanoAiu: number): string {
+  return `${(nanoAiu / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 })} credits`;
 }
 
 /** Thousands-separated integer token count. */
@@ -95,6 +104,15 @@ function formatDuration(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
+/** Compact idle-gap label, e.g. "12m", "1.5h". */
+function formatGap(ms: number): string {
+  const mins = Math.round(ms / 60_000);
+  if (mins >= 90) {
+    return `${(mins / 60).toFixed(1)}h`;
+  }
+  return `${Math.max(1, mins)}m`;
+}
+
 function formatTime(ts: number): string {
   if (!ts) {
     return '—';
@@ -137,7 +155,7 @@ function groupWarnings(group: MessageGroup, config: CoachConfig): CoachWarning[]
 
 interface Summary {
   totalCostNanoAiu: number;
-  monthCostNanoAiu: number;
+  todayCostNanoAiu: number;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalRequests: number;
@@ -146,11 +164,17 @@ interface Summary {
   aggregateCacheHitRate: number;
   priciestMessage?: MessageGroup;
   flaggedMessages: number;
+  /** Earliest request timestamp on disk (0 if none) — start of the logged window. */
+  coverageStartTs: number;
+  /** Latest request timestamp on disk (0 if none) — end of the logged window. */
+  coverageEndTs: number;
+  /** Distinct local calendar days with at least one logged request. */
+  coverageActiveDays: number;
 }
 
 function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
   let totalCost = 0;
-  let monthCost = 0;
+  let todayCost = 0;
   let totalInput = 0;
   let totalOutput = 0;
   let totalCached = 0;
@@ -159,17 +183,21 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
   let flagged = 0;
   let priciest: MessageGroup | undefined;
 
-  // Start of the current calendar month — the plan's credits reset monthly.
+  // Track the span of logged data (first → last request) plus the distinct
+  // calendar days that actually have logs, so the dashboard can state which
+  // window the figures cover (anything outside it isn't captured).
+  let coverageStart = 0;
+  let coverageEnd = 0;
+  const activeDays = new Set<string>();
+
+  // Data is already month-scoped upstream; the remaining time split is "today".
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 
   for (const chat of chats) {
     for (const g of chat.messages) {
       messageCount++;
       totalCost += g.totalCostNanoAiu;
-      if (g.startTime >= monthStart) {
-        monthCost += g.totalCostNanoAiu;
-      }
       totalInput += g.totalInputTokens;
       totalOutput += g.totalOutputTokens;
       totalCached += g.totalCachedTokens;
@@ -180,12 +208,28 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
       if (groupWarnings(g, config).length > 0) {
         flagged++;
       }
+      for (const r of g.requests) {
+        if (r.timestamp <= 0) {
+          continue;
+        }
+        if (r.timestamp >= todayStart) {
+          todayCost += r.costNanoAiu;
+        }
+        if (coverageStart === 0 || r.timestamp < coverageStart) {
+          coverageStart = r.timestamp;
+        }
+        if (r.timestamp > coverageEnd) {
+          coverageEnd = r.timestamp;
+        }
+        const d = new Date(r.timestamp);
+        activeDays.add(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`);
+      }
     }
   }
 
   return {
     totalCostNanoAiu: totalCost,
-    monthCostNanoAiu: monthCost,
+    todayCostNanoAiu: todayCost,
     totalInputTokens: totalInput,
     totalOutputTokens: totalOutput,
     totalRequests,
@@ -194,6 +238,9 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
     aggregateCacheHitRate: totalInput > 0 ? totalCached / totalInput : 0,
     priciestMessage: priciest,
     flaggedMessages: flagged,
+    coverageStartTs: coverageStart,
+    coverageEndTs: coverageEnd,
+    coverageActiveDays: activeDays.size,
   };
 }
 
@@ -240,7 +287,10 @@ function renderModelBadges(modelCounts: Record<string, number>): string {
 /** Plain-language explanation of each context source (shown on hover). */
 const SOURCE_HELP: Record<string, string> = {
   tools:
-    'JSON schemas for every tool the agent can call (read_file, edit, run, …). Fixed per request and usually cached — often the single largest chunk.',
+    'The "menu" of every tool the agent COULD call: JSON schemas (name, description, parameters) for ' +
+    'read_file, edit, run, every MCP tool, … — sent with every request so the model knows what\'s available, ' +
+    'even if it calls none of them. Not the tool RESULTS: what called tools return (e.g. file contents) is ' +
+    'counted under "Conversation / other". Usually cached — often the single largest chunk.',
   systemPrompt:
     "Copilot's base system prompt: the instructions that define how the assistant behaves. Fixed per request and usually cached.",
   attachments:
@@ -280,26 +330,92 @@ function renderToolTable(tools: ToolSummary[]): string {
     </table>`;
 }
 
-/** "Open editors and stuff" — where the context came from, with share bars. */
-function renderContextTable(sources: ContextSource[], attachments: AttachmentInfo[]): string {
+/** A request below this cache hit rate counts as "cold" (paid ~full price). */
+const COLD_CACHE_RATE = 0.3;
+
+/**
+ * "Why it cost X" — the plain-language cost story. Built ONLY from real logged
+ * numbers (each request's actual cost and actual cache hit rate), no estimates:
+ * cold requests paid full price for the whole context; warm ones got the cache
+ * discount. This answers the question the context-size table can't.
+ */
+function renderCostStory(group: MessageGroup): string {
+  const reqs = group.requests;
+  if (reqs.length === 0 || group.totalCostNanoAiu <= 0) {
+    return '';
+  }
+  let coldCost = 0;
+  let coldN = 0;
+  let warmCost = 0;
+  let warmN = 0;
+  let warmRateSum = 0;
+  for (const r of reqs) {
+    if (r.cacheHitRate < COLD_CACHE_RATE) {
+      coldCost += r.costNanoAiu;
+      coldN++;
+    } else {
+      warmCost += r.costNanoAiu;
+      warmN++;
+      warmRateSum += r.cacheHitRate;
+    }
+  }
+  const total = group.totalCostNanoAiu;
+  const pct = (n: number) => Math.round((n / total) * 100);
+  const rows: string[] = [];
+  if (coldN > 0) {
+    rows.push(`
+      <div class="story-row">
+        <span class="story-icon">🧊</span>
+        <span class="story-main"><b>Cache empty — paid full price.</b>
+          ${coldN} request${coldN === 1 ? '' : 's'} ran with no usable cache, so the <i>entire</i> context
+          (mostly Copilot's fixed tool catalog + system prompt) was billed at the full input rate.
+          Every new chat pays this once, on its first turn.</span>
+        <span class="story-cost">${escapeHtml(formatCost(coldCost))} <span class="muted">· ${pct(coldCost)}%</span></span>
+      </div>`);
+  }
+  if (warmN > 0) {
+    const avg = Math.round((warmRateSum / warmN) * 100);
+    rows.push(`
+      <div class="story-row">
+        <span class="story-icon">🔥</span>
+        <span class="story-main"><b>Cache working — discounted.</b>
+          ${warmN} request${warmN === 1 ? '' : 's'} reused ~${avg}% of their context from the prompt cache,
+          so the repeated bulk (tool catalog, system prompt, history) cost a fraction of full price.
+          Staying in one chat keeps this discount going.</span>
+        <span class="story-cost">${escapeHtml(formatCost(warmCost))} <span class="muted">· ${pct(warmCost)}%</span></span>
+      </div>`);
+  }
+  return `<div class="story">${rows.join('')}</div>`;
+}
+
+/** "Open editors and stuff" — what fills the context window, sizes + shares.
+ *  Sizes only, on purpose: the logs never record cost per context block, and a
+ *  derived per-source cost estimate proved more confusing than helpful — the
+ *  honest cost story (cold vs cached turns) is rendered by renderCostStory(). */
+function renderContextTable(group: MessageGroup): string {
+  const sources = group.peakContext;
+  const attachments = group.peakAttachments;
   if (sources.length === 0) {
     return '<p class="muted small">No context breakdown available (older logs may not record it).</p>';
   }
   const total = sources.reduce((s, c) => s + c.chars, 0) || 1;
   const fixedKeys = new Set(['systemPrompt', 'tools']);
-  let hasFixed = false;
-  const rows = sources
-    .map((c) => {
-      const pct = Math.round((c.chars / total) * 100);
-      const isAttach = c.key === 'attachments';
-      const isFixed = fixedKeys.has(c.key);
-      hasFixed = hasFixed || isFixed;
-      const help = SOURCE_HELP[c.key] ?? '';
-      return `
+
+  // Fixed (cached, untrimmable) sources first, then the context you control —
+  // each group with a labelled subtotal so the split is obvious at a glance.
+  const fixed = sources.filter((c) => fixedKeys.has(c.key));
+  const variable = sources.filter((c) => !fixedKeys.has(c.key));
+
+  const renderRow = (c: ContextSource) => {
+    const pct = Math.round((c.chars / total) * 100);
+    const isAttach = c.key === 'attachments';
+    const isFixed = fixedKeys.has(c.key);
+    const help = SOURCE_HELP[c.key] ?? '';
+    return `
         <tr class="${isAttach ? 'highlight' : ''}">
           <td>
             <span class="src-label">${escapeHtml(c.label)}</span>
-            ${isFixed ? '<span class="tip tip-left tag-fixed" data-tip="Fixed per request and usually cached — you can’t trim this.">cached</span>' : ''}
+            ${isFixed ? '<span class="tip tip-left tag-fixed" data-tip="“Cached” = this is the part the prompt cache stores. The chat’s FIRST turn pays full price for it (cache 0% — that turn fills the cache); every later turn reads it back at ~1/10 price. So it costs real money exactly once per chat.">cached</span>' : ''}
             ${help ? '<span class="tip tip-left info" data-tip="' + escapeHtml(help) + '">ⓘ</span>' : ''}
           </td>
           <td class="num">${escapeHtml(approxTokens(c.chars))}</td>
@@ -308,8 +424,38 @@ function renderContextTable(sources: ContextSource[], attachments: AttachmentInf
             <span class="bar-pct muted">${pct}%</span>
           </td>
         </tr>`;
-    })
-    .join('');
+  };
+
+  const groupHeader = (label: string, items: ContextSource[], tip: string) => {
+    if (items.length === 0) {
+      return '';
+    }
+    const tok = items.reduce((s, c) => s + c.chars, 0);
+    return `
+        <tr class="grp">
+          <td><span class="tip tip-left" data-tip="${escapeHtml(tip)}">${escapeHtml(label)}</span></td>
+          <td class="num">${escapeHtml(approxTokens(tok))}</td>
+          <td class="bar-cell muted">${Math.round((tok / total) * 100)}% of context</td>
+        </tr>`;
+  };
+
+  const hasFixed = fixed.length > 0;
+  const rows =
+    groupHeader(
+      '🔒 Copilot overhead — same every request',
+      fixed,
+      'The fixed prefix: tool definitions + system prompt. It rides along on every single request. ' +
+        'After the first turn the prompt cache serves it at ~1/10 price — big in tokens, small in cost — ' +
+        'and it isn’t yours to trim (except by disabling unused MCP servers / tool sets).'
+    ) +
+    fixed.map(renderRow).join('') +
+    groupHeader(
+      '✂️ Your context — what you can trim',
+      variable,
+      'Context you control: open/attached files, conversation history, instructions, your message. ' +
+        'Closing unused tabs and keeping chats focused shrinks this on every turn.'
+    ) +
+    variable.map(renderRow).join('');
 
   // List the actual attached files (open editors). The same file is often sent
   // on several turns in the logged history, so de-duplicate by path and show how
@@ -339,8 +485,11 @@ function renderContextTable(sources: ContextSource[], attachments: AttachmentInf
   }
 
   const caption =
-    `<p class="muted small caption">Estimated from logged context (~4 chars ≈ 1 token); hover a source for details.` +
-    `${hasFixed ? ' “cached” items (system prompt, tool definitions) are fixed per request and you can’t trim them.' : ''}</p>`;
+    `<p class="muted small caption">The ≈ sizes are estimates — logged text ÷ 4 chars per token — so they'll be ` +
+    `close to, but never exactly, the real “in N” token counts in the turn-by-turn below (typically within ~5–10%). ` +
+    `<b>Size ≠ cost:</b> the 🔒 rows are paid at full price <b>once</b>, on the chat's first turn (cache 0% — that turn ` +
+    `fills the cache); every later turn reads them from cache at ~1/10 price — see “Why it cost…” above.` +
+    `${hasFixed ? ' Only the ✂️ rows are yours to shrink.' : ''}</p>`;
 
   return `
     <table class="mini">
@@ -355,12 +504,13 @@ function renderDrivers(group: MessageGroup): string {
   return `
     <div class="drivers">
       <div class="driver-col">
-        <div class="driver-head">🔧 Tools taking the most</div>
+        <div class="driver-head">🔧 Tools the agent actually called
+          <span class="tip info" data-tip="What the agent did during this message. Payload = the arguments it sent plus what the tool returned (e.g. the contents of files it read), which lands back in the conversation context. Not the same as “Tool definitions” on the right — that's the catalog of tools it COULD call, sent with every request.">ⓘ</span></div>
         ${renderToolTable(group.toolSummary)}
       </div>
       <div class="driver-col">
-        <div class="driver-head">📎 Where context came from <span class="muted small">(logged items; system prompt &amp; cached history not itemized)</span></div>
-        ${renderContextTable(group.peakContext, group.peakAttachments)}
+        <div class="driver-head">📎 What fills the context window <span class="muted small">(per request — size, not cost)</span></div>
+        ${renderContextTable(group)}
       </div>
     </div>`;
 }
@@ -461,6 +611,17 @@ function renderGroup(group: MessageGroup, config: CoachConfig, isOpen: boolean):
     (toolCount ? ` · ${toolCount} tool call${toolCount === 1 ? '' : 's'}` : '');
   const open = isOpen ? ' open' : '';
 
+  // Idle-gap indicator: a pause long enough to expire the prompt cache.
+  const cacheIdleMs = Math.max(0, config.cacheIdleMinutes) * 60_000;
+  const gap = group.idleGapMsBefore ?? 0;
+  const showGap = group.chatMessageIndex > 0 && cacheIdleMs > 0 && gap >= cacheIdleMs;
+  const gapChip = showGap
+    ? `<span class="chip chip-gap tip tip-left" data-tip="${escapeHtml(
+        `~${Math.round(gap / 60_000)} min idle before this message — past the ~${config.cacheIdleMinutes} min ` +
+          `prompt-cache window, so the cache likely expired and the context was re-billed at the full input rate.`
+      )}">⏱ ${escapeHtml(formatGap(gap))} idle</span>`
+    : '';
+
   // "Extra" model calls = requests beyond one-per-turn (i.e. side-model calls).
   const extraCalls = Math.max(0, reqCount - group.turnCount);
   const extraNote =
@@ -478,6 +639,7 @@ function renderGroup(group: MessageGroup, config: CoachConfig, isOpen: boolean):
           <span class="msg-asked" title="${askedTitle}">${asked}</span>
           <span class="msg-meta">
             <span class="chip">${reqLabel}</span>
+            ${gapChip}
             <span class="chip tip tip-left" data-tip="${escapeHtml(
               `Aggregate over this message's ${group.requests.length} request${group.requests.length === 1 ? '' : 's'}: ` +
                 `${formatTokens(group.totalCachedTokens)} of ${formatTokens(group.totalInputTokens)} input tokens served from cache. ` +
@@ -490,6 +652,8 @@ function renderGroup(group: MessageGroup, config: CoachConfig, isOpen: boolean):
         ${warnings.length ? `<div class="msg-warnings">${renderWarnings(warnings)}</div>` : ''}
       </summary>
       <div class="msg-body">
+        <div class="section-title">Why it cost ${escapeHtml(formatCost(group.totalCostNanoAiu))}</div>
+        ${renderCostStory(group)}
         <div class="section-title">Where the tokens went</div>
         ${renderDrivers(group)}
         <div class="section-title">Turn-by-turn <span class="muted small">(the main request of each turn, with its tool calls nested)</span>${extraNote}</div>
@@ -513,11 +677,19 @@ function renderChat(chat: ChatGroup, config: CoachConfig, openState: Map<string,
     `${n} message${n === 1 ? '' : 's'} · ${chat.requestCount} request${chat.requestCount === 1 ? '' : 's'}` +
     (chat.toolCount ? ` · ${chat.toolCount} tool call${chat.toolCount === 1 ? '' : 's'}` : '');
 
+  const eff = computeChatEfficiency(chat, config);
+  const effBadge = eff.hasData
+    ? `<span class="grade-badge ${gradeClass(eff.score)} tip tip-left" data-tip="${escapeHtml(
+        `Chat efficiency ${eff.score}/100 — cache reuse ${eff.cacheScore}, clean runs ${eff.cleanScore} (${eff.cleanMessages}/${eff.messageCount}).`
+      )}">${eff.grade}</span>`
+    : '';
+
   return `
     <details class="chat" data-id="${escapeHtml(chat.sessionId)}"${isOpen ? ' open' : ''}>
       <summary>
         <div class="chat-head">
           <span class="chat-icon">🧵</span>
+          ${effBadge}
           <span class="chat-title" title="${escapeHtml(chat.title)}">${escapeHtml(truncate(chat.title, 70))}</span>
           <span class="chat-cost">${escapeHtml(formatCost(chat.totalCostNanoAiu))}</span>
           ${usd}
@@ -543,8 +715,10 @@ function renderChat(chat: ChatGroup, config: CoachConfig, openState: Map<string,
 function renderEmptyState(): string {
   return `
     <div class="empty">
-      <h2>No Copilot debug logs found yet</h2>
-      <p>To collect data, enable both of these settings in VS Code, then use Copilot Chat a few times:</p>
+      <h2>No Copilot usage logged this month yet</h2>
+      <p>Token Coach shows the current calendar month only — it starts fresh on the 1st, like GitHub's
+        credit meter. If you've never collected data, enable both of these settings in VS Code, then use
+        Copilot Chat a few times:</p>
       <ul>
         <li><code>github.copilot.chat.agentDebugLog.enabled</code> → <code>true</code></li>
         <li><code>github.copilot.chat.agentDebugLog.fileLogging.enabled</code> → <code>true</code></li>
@@ -555,70 +729,289 @@ function renderEmptyState(): string {
     </div>`;
 }
 
-/** "Plan budget" gauge: this month's estimated spend vs the plan's $ allowance. */
-function renderBudgetCard(summary: Summary, config: CoachConfig): string {
-  if (config.usdPerAiu <= 0 || config.planMonthlyUsd <= 0) {
+/** Short local date like "Jun 7, 2026". */
+function formatDateShort(ts: number): string {
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** Human "Jun 7 → Jun 8, 2026" (or a single date when the span is one day). */
+function formatCoverageRange(summary: Summary): string {
+  if (!summary.coverageStartTs || !summary.coverageEndTs) {
     return '';
   }
-  const monthUsd = (summary.monthCostNanoAiu / 1e9) * config.usdPerAiu;
-  const plan = config.planMonthlyUsd;
-  const pct = Math.min(100, Math.round((monthUsd / plan) * 100));
-  const over = monthUsd > plan;
+  const start = formatDateShort(summary.coverageStartTs);
+  const end = formatDateShort(summary.coverageEndTs);
+  return start === end ? start : `${start} → ${end}`;
+}
+
+/** "Jun 1 → Jun 10, 2026" — the 1st of the current month through today. */
+function formatMonthToDateRange(): string {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const start = formatDateShort(monthStart);
+  const end = formatDateShort(now.getTime());
+  return start === end ? start : `${start} → ${end}`;
+}
+
+/**
+ * "Used" card — credits used this calendar month. The data is month-scoped
+ * upstream (extension.ts filters to the current month), so this starts fresh
+ * on the 1st of each month, like GitHub's credit meter. Still only the
+ * sessions Copilot debug-logged on this machine.
+ */
+function renderUsedCard(summary: Summary, config: CoachConfig): string {
+  const showUsd = config.usdPerAiu > 0;
+  const monthRange = formatMonthToDateRange();
+  const loggedRange = formatCoverageRange(summary);
+  const value = showUsd
+    ? formatUsd(summary.totalCostNanoAiu, config.usdPerAiu)
+    : formatCost(summary.totalCostNanoAiu);
   const help =
-    `Estimate — your GitHub billing page is the source of truth. We compute ` +
-    `usage = copilotUsageNanoAiu × $${config.usdPerAiu} (1 AIU ≈ 1 AI credit ≈ $0.01) vs a ` +
-    `$${plan.toFixed(0)}/month allowance. It can differ from GitHub's % because the real ` +
-    `allowance may include a flex amount on top of the plan price, and some base-model usage ` +
-    `isn't charged. To match GitHub exactly, calibrate: set planMonthlyUsd to your real monthly ` +
-    `allowance, or scale usdPerAiu by (GitHub % ÷ this %).`;
+    `Credits used from the 1st of the month through today (${monthRange}), from the Copilot debug ` +
+    `logs on this machine${loggedRange ? ` — logs were written on ${loggedRange}` : ''}. Resets ` +
+    `automatically on the 1st of each month, like GitHub's monthly credit meter. The logs are a ` +
+    `partial record — sessions on days the log wasn't written, on other machines, or in ask/inline ` +
+    `(non-agent) modes aren't here — so this reads lower than GitHub's account-wide meter. ` +
+    `1 credit = 1 AIU = $0.01. Run "Token Coach: Check GitHub credit usage" for your real account total.`;
   return `
-    <div class="card card-budget ${over ? 'card-flag' : ''}">
-      <div class="card-label">Plan budget · this month <span class="muted small">(est.)</span> <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
-      <div class="card-value">${escapeHtml(formatUsd(summary.monthCostNanoAiu, config.usdPerAiu))} <span class="muted budget-of">/ $${plan.toFixed(0)}</span></div>
-      <div class="budget-bar"><span class="budget-fill ${over ? 'over' : ''}" style="width:${pct}%"></span></div>
-      <div class="card-sub muted">~${pct}% of your $${plan.toFixed(0)}/mo credits (estimate)${over ? ' — over!' : ''}</div>
+    <div class="card card-budget">
+      <div class="card-label">Used · this month <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
+      <div class="card-value">${escapeHtml(value)}</div>
+      <div class="card-sub muted">${escapeHtml(formatCredits(summary.totalCostNanoAiu))} · ${escapeHtml(monthRange)}</div>
     </div>`;
 }
 
-function renderSummary(summary: Summary, config: CoachConfig): string {
+/** "Today" card — what's been spent since local midnight, plus the month's daily pace. */
+function renderTodayCard(summary: Summary, config: CoachConfig): string {
+  const showUsd = config.usdPerAiu > 0;
+  const value = showUsd
+    ? formatUsd(summary.todayCostNanoAiu, config.usdPerAiu)
+    : formatCost(summary.todayCostNanoAiu);
+  // Honest arithmetic only: month-to-date total ÷ days elapsed this month.
+  const daysElapsed = new Date().getDate();
+  const avgNano = summary.totalCostNanoAiu / Math.max(1, daysElapsed);
+  const avg = showUsd ? formatUsd(avgNano, config.usdPerAiu) : formatCost(avgNano);
+  const help =
+    `Credits used since local midnight. The average is simply this month's logged total divided by ` +
+    `the ${daysElapsed} day${daysElapsed === 1 ? '' : 's'} elapsed so far — no projection, just pace.`;
+  return `
+    <div class="card">
+      <div class="card-label">Today <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
+      <div class="card-value">${escapeHtml(value)}</div>
+      <div class="card-sub muted">avg ${escapeHtml(avg)}/day this month</div>
+    </div>`;
+}
+
+/**
+ * Banner stating the window the data covers — the current calendar month only
+ * (the data is month-scoped upstream, so the whole dashboard resets on the 1st).
+ * Token Coach only reads sessions Copilot wrote to its debug logs on this
+ * machine, so usage outside the window (other days/machines, ask/inline modes)
+ * isn't included, which is why the total can read lower than GitHub's meter.
+ */
+function renderCoverage(summary: Summary): string {
+  const range = formatCoverageRange(summary);
+  if (!range) {
+    return '';
+  }
+  const days = summary.coverageActiveDays;
+  const sessions = summary.chatCount;
+  const monthRange = formatMonthToDateRange();
+  const help =
+    `Token Coach shows the current calendar month only — everything resets automatically on the 1st, ` +
+    `like GitHub's credit meter. It also only sees sessions Copilot wrote to its debug logs on this ` +
+    `machine: within ${monthRange}, logs exist for ${range} (${days} day${days === 1 ? '' : 's'} with logs, ${sessions} session${sessions === 1 ? '' : 's'}). ` +
+    `Sessions on days the log wasn't written, on other machines, or in ask/inline modes aren't captured, ` +
+    `so the total reads lower than GitHub's account-wide monthly meter. ` +
+    `Run "Token Coach: Check GitHub credit usage" for the real account total.`;
+  return `
+    <div class="coverage">
+      <span class="coverage-icon">📅</span>
+      <span>The figures below cover <b>${escapeHtml(monthRange)}</b> — this month so far
+        <span class="muted">(logs on ${days} day${days === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'})</span> —
+        and reset automatically when a new month starts.</span>
+      <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span>
+    </div>`;
+}
+
+/** Bucket a grade into a colour class for the efficiency card. */
+function gradeClass(score: number): string {
+  if (score >= 75) {
+    return 'grade-good';
+  }
+  if (score >= 50) {
+    return 'grade-mid';
+  }
+  return 'grade-bad';
+}
+
+/** "Efficiency" card: the single A–F health grade, with its two sub-scores. */
+function renderEfficiencyCard(eff: EfficiencyScore): string {
+  if (!eff.hasData) {
+    return '';
+  }
+  const help =
+    `A single health grade for your Copilot usage. Score = 60% cache reuse + 40% clean runs. ` +
+    `Cache reuse rewards staying in a chat (cached input tokens are billed far cheaper); ` +
+    `clean runs is the share of messages with no warning (large input, low mid-chat cache, ` +
+    `heavy attachments, expensive request). Higher = cheaper. ` +
+    `Aggregate cache hit rate: ${formatPercent(eff.cacheHitRate)}.`;
+  return `
+    <div class="card card-eff ${gradeClass(eff.score)}">
+      <div class="card-label">Efficiency <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
+      <div class="card-value"><span class="grade">${eff.grade}</span> <span class="muted score-of">${eff.score}/100</span></div>
+      <div class="card-sub muted">Cache reuse ${eff.cacheScore} · Clean ${eff.cleanScore} <span class="muted">(${eff.cleanMessages}/${eff.messageCount})</span></div>
+    </div>`;
+}
+
+/** Compact daily trend of the efficiency grade (the "saved history" view). */
+function renderHistory(history: DailySnapshot[]): string {
+  if (history.length < 2) {
+    return ''; // need at least two days to call it a trend
+  }
+  const chips = history
+    .slice(-14)
+    .map((h) => {
+      const tip = `${h.date}: grade ${h.grade} (${h.score}/100) · month ${formatCost(h.monthCostNanoAiu)} · ${formatTokensCompact(h.totalTokens)} tok`;
+      return `<span class="hist-chip ${gradeClass(h.score)} tip" data-tip="${escapeHtml(tip)}">
+        <span class="hist-grade">${h.grade}</span><span class="hist-date muted">${escapeHtml(h.date.slice(5))}</span></span>`;
+    })
+    .join('');
+  return `
+    <details class="history" open>
+      <summary>📈 Efficiency trend <span class="muted small">(daily snapshots — hover a day for details)</span></summary>
+      <div class="hist-row">${chips}</div>
+    </details>`;
+}
+
+interface ModelSpend {
+  model: string;
+  requests: number;
+  tokens: number;
+  cost: number;
+}
+
+/** Aggregate cost / tokens / requests per model, priciest first. */
+function buildModelSpend(data: ParsedData): ModelSpend[] {
+  const byModel = new Map<string, ModelSpend>();
+  for (const r of data.requests) {
+    const e = byModel.get(r.model) ?? { model: r.model, requests: 0, tokens: 0, cost: 0 };
+    e.requests += 1;
+    e.tokens += r.inputTokens + r.outputTokens;
+    e.cost += r.costNanoAiu;
+    byModel.set(r.model, e);
+  }
+  return [...byModel.values()].sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
+}
+
+/** "Where your premium budget goes" — per-model spend table, billed vs included. */
+function renderModelSpend(data: ParsedData, config: CoachConfig): string {
+  const rows = buildModelSpend(data);
+  if (rows.length === 0) {
+    return '';
+  }
+  const totalCost = rows.reduce((s, r) => s + r.cost, 0) || 1;
+  const body = rows
+    .map((r) => {
+      const pct = Math.round((r.cost / totalCost) * 100);
+      const billed = r.cost > 0;
+      const tag = billed
+        ? '<span class="tag-billed">billed</span>'
+        : '<span class="tag-included">included</span>';
+      const usd =
+        config.usdPerAiu > 0
+          ? ` <span class="muted">(${escapeHtml(formatUsd(r.cost, config.usdPerAiu))})</span>`
+          : '';
+      return `
+        <tr>
+          <td><span class="badge">${escapeHtml(r.model)}</span> ${tag}</td>
+          <td class="num">${r.requests.toLocaleString()}</td>
+          <td class="num">${escapeHtml(formatTokensCompact(r.tokens))}</td>
+          <td class="num">${escapeHtml(formatCost(r.cost))}${usd}</td>
+          <td class="bar-cell">
+            <span class="bar"><span class="bar-fill" style="width:${pct}%"></span></span>
+            <span class="bar-pct muted">${pct}%</span>
+          </td>
+        </tr>`;
+    })
+    .join('');
+  return `
+    <details class="model-spend" open>
+      <summary>💸 Model spend
+        <span class="muted small">(where your premium budget goes — “included” models are free under your plan)</span></summary>
+      <table class="mini">
+        <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Cost</th><th>Share of cost</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </details>`;
+}
+
+/** "Tool overhead" card: catalog size shipped every request + dead-weight count. */
+function renderToolCard(inv: ToolInventory): string {
+  if (!inv.hasData) {
+    return '';
+  }
+  const perReqTok = Math.round(inv.perRequestChars / 4);
+  const flagged = inv.unused.length > 0;
+  const help =
+    `Every request ships the full tool catalog (${inv.defined.length} tools, ≈${perReqTok.toLocaleString()} tok) ` +
+    `as part of the cached prefix, so you pay cache-read on it each turn. ${inv.unused.length} of them were ` +
+    `never called in this data — dead weight. Trim by disabling unused MCP servers / tool sets in Copilot.`;
+  return `
+    <div class="card ${flagged ? 'card-flag' : ''}">
+      <div class="card-label">Tool overhead <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
+      <div class="card-value">${inv.defined.length} <span class="muted score-of">tools · ≈${perReqTok.toLocaleString()} tok/req</span></div>
+      <div class="card-sub muted">${inv.unused.length} never called${flagged ? ' — trim to shrink every request' : ''}</div>
+    </div>`;
+}
+
+/** Collapsible list of defined-but-never-called tools (the "skills you never invoke" view). */
+function renderToolInventory(inv: ToolInventory): string {
+  if (!inv.hasData || inv.unused.length === 0) {
+    return '';
+  }
+  const items = inv.unused.map((n) => `<li><code>${escapeHtml(n)}</code></li>`).join('');
+  return `
+    <details class="tools-inv card-flag">
+      <summary>🧹 ${inv.unused.length} tool${inv.unused.length === 1 ? '' : 's'} defined but never called
+        <span class="muted small">(dead weight in every cached request)</span></summary>
+      <p class="muted small">These tools are offered to the model on every request — so they sit in your cached
+        prefix and cost cache-read tokens each turn — but were never invoked in the logged period. If they come
+        from an MCP server or tool set you don't use, disabling it shrinks every request from here on.</p>
+      <ul class="tool-list">${items}</ul>
+    </details>`;
+}
+
+function renderSummary(
+  summary: Summary,
+  efficiency: EfficiencyScore,
+  inventory: ToolInventory,
+  config: CoachConfig
+): string {
   const priciest = summary.priciestMessage;
   const priciestText = priciest
     ? `${escapeHtml(formatCost(priciest.totalCostNanoAiu))} <span class="muted" title="${
         priciest.userMessage ? escapeHtml(priciest.userMessage) : ''
       }">(${escapeHtml(truncate(priciest.userMessage ?? '—', 28))})</span>`
     : '—';
-  const totalUsd =
-    config.usdPerAiu > 0
-      ? `<div class="card-sub muted">≈ ${escapeHtml(formatUsd(summary.totalCostNanoAiu, config.usdPerAiu))} all-time</div>`
-      : '';
-
+  // Order: money first (month, today), then health (efficiency, cache),
+  // then volume (activity), then waste signals (tools, priciest, flagged).
   return `
     <div class="cards">
-      <div class="card">
-        <div class="card-label">Total cost</div>
-        <div class="card-value">${escapeHtml(formatCost(summary.totalCostNanoAiu))}</div>
-        ${totalUsd}
-      </div>
-      ${renderBudgetCard(summary, config)}
-      <div class="card">
-        <div class="card-label">Total tokens</div>
-        <div class="card-value">${formatTokens(summary.totalInputTokens + summary.totalOutputTokens)}</div>
-        <div class="card-sub muted">${escapeHtml(formatTokensCompact(summary.totalInputTokens))} in · ${escapeHtml(formatTokensCompact(summary.totalOutputTokens))} out</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Chats</div>
-        <div class="card-value">${summary.chatCount.toLocaleString()}</div>
-        <div class="card-sub muted">${summary.messageCount.toLocaleString()} messages</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Messages</div>
-        <div class="card-value">${summary.messageCount.toLocaleString()}</div>
-        <div class="card-sub muted">${summary.totalRequests.toLocaleString()} requests</div>
-      </div>
+      ${renderUsedCard(summary, config)}
+      ${renderTodayCard(summary, config)}
+      ${renderEfficiencyCard(efficiency)}
       <div class="card">
         <div class="card-label">Cache hit rate</div>
         <div class="card-value">${escapeHtml(formatPercent(summary.aggregateCacheHitRate))}</div>
+        <div class="card-sub muted">cached input is ~80% cheaper</div>
       </div>
+      <div class="card">
+        <div class="card-label">Activity</div>
+        <div class="card-value">${summary.chatCount.toLocaleString()} <span class="muted score-of">chat${summary.chatCount === 1 ? '' : 's'}</span></div>
+        <div class="card-sub muted">${summary.messageCount.toLocaleString()} messages · ${summary.totalRequests.toLocaleString()} requests</div>
+      </div>
+      ${renderToolCard(inventory)}
       <div class="card">
         <div class="card-label">Priciest message</div>
         <div class="card-value">${priciestText}</div>
@@ -626,6 +1019,7 @@ function renderSummary(summary: Summary, config: CoachConfig): string {
       <div class="card ${summary.flaggedMessages > 0 ? 'card-flag' : ''}">
         <div class="card-label">Flagged messages</div>
         <div class="card-value">${summary.flaggedMessages.toLocaleString()}</div>
+        <div class="card-sub muted">${summary.flaggedMessages > 0 ? 'expand a flagged row for advice' : 'no waste signals'}</div>
       </div>
     </div>`;
 }
@@ -640,6 +1034,7 @@ function renderHtml(
   webview: vscode.Webview,
   data: ParsedData,
   config: CoachConfig,
+  history: DailySnapshot[],
   nonce: string,
   openState: Map<string, boolean>
 ): string {
@@ -651,6 +1046,8 @@ function renderHtml(
 
   const chats = groupByChat(data);
   const summary = buildSummary(chats, config);
+  const efficiency = computeEfficiencyFromChats(chats, config);
+  const inventory = analyzeToolInventory(data);
 
   const MAX_CHATS = 100;
   const shown = chats.slice(0, MAX_CHATS);
@@ -659,7 +1056,11 @@ function renderHtml(
     chats.length === 0
       ? renderEmptyState()
       : `
-        ${renderSummary(summary, config)}
+        ${renderCoverage(summary)}
+        ${renderSummary(summary, efficiency, inventory, config)}
+        ${renderHistory(history)}
+        ${renderModelSpend(data, config)}
+        ${renderToolInventory(inventory)}
         ${
           chats.length > MAX_CHATS
             ? `<p class="muted">Showing the ${MAX_CHATS} most recent of ${chats.length.toLocaleString()} chats.</p>`
@@ -696,6 +1097,14 @@ function renderHtml(
     .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
     .muted { color: var(--vscode-descriptionForeground); }
     .hint { margin: 8px 0 12px; font-size: 0.9em; }
+    .coverage {
+      display: flex; align-items: flex-start; gap: 8px; margin: 0 0 16px;
+      padding: 10px 14px; border-radius: 6px; font-size: 0.9em; line-height: 1.45;
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 35%, transparent);
+    }
+    .coverage-icon { flex: 0 0 auto; }
+    .coverage b { font-variant-numeric: tabular-nums; }
     button {
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
@@ -722,6 +1131,68 @@ function renderHtml(
     .budget-fill { display: block; height: 100%;
       background: var(--vscode-charts-green, var(--vscode-progressBar-background)); }
     .budget-fill.over { background: var(--vscode-editorError-foreground); }
+
+    /* Efficiency grade card */
+    .card-eff .grade { font-weight: 800; font-size: 1.05em; }
+    .card-eff .score-of { font-size: 0.6em; font-weight: 400; }
+    .card-eff.grade-good .grade { color: var(--vscode-charts-green, #4ec9b0); }
+    .card-eff.grade-mid .grade { color: var(--vscode-charts-yellow, #d7ba7d); }
+    .card-eff.grade-bad .grade { color: var(--vscode-editorError-foreground); }
+    .card-eff.grade-bad { border-color: var(--vscode-editorError-foreground); }
+
+    /* Per-chat grade badge (in the chat header) */
+    .grade-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 1.5em; height: 1.5em; padding: 0 4px; border-radius: 4px;
+      font-weight: 800; font-size: 0.85em; cursor: help;
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.4));
+    }
+    .grade-badge.grade-good { color: var(--vscode-charts-green, #4ec9b0); border-color: color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 50%, transparent); }
+    .grade-badge.grade-mid { color: var(--vscode-charts-yellow, #d7ba7d); border-color: color-mix(in srgb, var(--vscode-charts-yellow, #d7ba7d) 50%, transparent); }
+    .grade-badge.grade-bad { color: var(--vscode-editorError-foreground); border-color: color-mix(in srgb, var(--vscode-editorError-foreground) 50%, transparent); }
+
+    /* Tool inventory (structural waste) */
+    .tools-inv {
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+      border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+    }
+    .tools-inv > summary { cursor: pointer; font-weight: 600; }
+    .tool-list { columns: 2; gap: 24px; margin: 8px 0 2px; padding-left: 18px; }
+    .tool-list li { margin: 2px 0; }
+
+    /* Model spend table */
+    .model-spend {
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+      border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+    }
+    .model-spend > summary { cursor: pointer; font-weight: 600; margin-bottom: 6px; }
+    .tag-billed, .tag-included {
+      font-size: 0.7em; text-transform: uppercase; letter-spacing: .03em;
+      padding: 0 5px; border-radius: 3px; margin-left: 4px;
+    }
+    .tag-billed { background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 22%, transparent); }
+    .tag-included { background: color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 22%, transparent); }
+
+    /* Efficiency trend */
+    .history {
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+      border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+    }
+    .history > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+    .hist-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .hist-chip {
+      display: inline-flex; flex-direction: column; align-items: center; cursor: help;
+      min-width: 42px; padding: 4px 6px; border-radius: 6px;
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.35));
+    }
+    .hist-grade { font-weight: 800; }
+    .hist-chip.grade-good .hist-grade { color: var(--vscode-charts-green, #4ec9b0); }
+    .hist-chip.grade-mid .hist-grade { color: var(--vscode-charts-yellow, #d7ba7d); }
+    .hist-chip.grade-bad .hist-grade { color: var(--vscode-editorError-foreground); }
+    .hist-date { font-size: 0.75em; }
 
     /* Chat (session) groups */
     .chats { display: flex; flex-direction: column; gap: 14px; }
@@ -763,6 +1234,11 @@ function renderHtml(
       background: var(--vscode-badge-background, rgba(127,127,127,0.2));
       color: var(--vscode-badge-foreground, inherit);
     }
+    .chip-gap {
+      cursor: help;
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 22%, transparent);
+      color: var(--vscode-foreground);
+    }
     .msg-models { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
     .badge {
       font-size: 0.78em; padding: 1px 7px; border-radius: 4px;
@@ -785,6 +1261,23 @@ function renderHtml(
     }
     table.mini .num, table.mini th.num { text-align: right; font-variant-numeric: tabular-nums; }
     table.mini tr.highlight td { background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent); }
+    table.mini tr.grp td {
+      font-weight: 600; padding-top: 10px;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.07));
+      border-bottom: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+    }
+
+    /* "Why it cost X" story rows */
+    .story { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 6px; }
+    .story-row {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 8px 12px; border-radius: 6px; line-height: 1.45;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.06));
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.25));
+    }
+    .story-icon { flex: 0 0 auto; }
+    .story-main { flex: 1 1 300px; }
+    .story-cost { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .bar-cell { display: flex; align-items: center; gap: 6px; }
     .bar { flex: 1; height: 8px; border-radius: 4px; background: var(--vscode-widget-border, rgba(127,127,127,0.25)); overflow: hidden; min-width: 60px; }
     .bar-fill { display: block; height: 100%; background: var(--vscode-progressBar-background, var(--vscode-button-background)); }
@@ -869,7 +1362,8 @@ function renderHtml(
     <h1>📊 Token Coach</h1>
     ${extensionVersion ? `<span class="ver">v${escapeHtml(extensionVersion)}</span>` : ''}
     <button id="refresh" title="Re-scan logs">↻ Refresh</button>
-    <span class="muted">Cost in AIU (1 AIU = 1,000,000,000 NanoAiu). Context sizes are estimates (~4 chars ≈ 1 token).</span>
+    <button id="export" title="Save a Markdown report">⤓ Export</button>
+    <span class="muted">Usage in credits (1 credit = 1 AIU = $0.01). Context sizes are estimates (~4 chars ≈ 1 token).</span>
   </div>
   ${body}
   <script nonce="${nonce}">
@@ -878,6 +1372,10 @@ function renderHtml(
     const btn = document.getElementById('refresh');
     if (btn) {
       btn.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
+    }
+    const exportBtn = document.getElementById('export');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', () => vscode.postMessage({ command: 'export' }));
     }
 
     // Report expand/collapse (chats and messages) so the extension keeps them as
@@ -906,15 +1404,9 @@ function renderHtml(
 </html>`;
 }
 
-/** Generate a CSP nonce without relying on Math.random. */
+/** Generate a cryptographically random CSP nonce. */
 function makeNonce(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let text = '';
-  for (let i = 0; i < 32; i++) {
-    // Time-derived but good enough for a CSP nonce (not security-sensitive here).
-    text += chars.charAt((Date.now() + i * 7919) % chars.length);
-  }
-  return text;
+  return crypto.randomBytes(16).toString('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +1439,8 @@ export class DashboardPanel {
       (message) => {
         if (message?.command === 'refresh') {
           this.onRefreshRequested();
+        } else if (message?.command === 'export') {
+          void vscode.commands.executeCommand('tokenCoach.exportReport');
         } else if (message?.command === 'toggle' && typeof message.id === 'string') {
           // Remember expand/collapse so a refresh keeps chats/messages as they were.
           this.openState.set(message.id, !!message.open);
@@ -961,13 +1455,14 @@ export class DashboardPanel {
   static createOrShow(
     data: ParsedData,
     config: CoachConfig,
-    onRefreshRequested: () => void
+    onRefreshRequested: () => void,
+    history: DailySnapshot[] = []
   ): DashboardPanel {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
     if (DashboardPanel.current) {
       DashboardPanel.current.panel.reveal(column);
-      DashboardPanel.current.update(data, config);
+      DashboardPanel.current.update(data, config, history);
       return DashboardPanel.current;
     }
 
@@ -979,23 +1474,24 @@ export class DashboardPanel {
     );
 
     DashboardPanel.current = new DashboardPanel(panel, onRefreshRequested);
-    DashboardPanel.current.update(data, config);
+    DashboardPanel.current.update(data, config, history);
     return DashboardPanel.current;
   }
 
   /** Re-render with fresh data. Safe to call when the panel is hidden. */
-  update(data: ParsedData, config: CoachConfig): void {
-    // Surface the headline totals in the editor tab title.
+  update(data: ParsedData, config: CoachConfig, history: DailySnapshot[] = []): void {
+    // Surface "how much you've used" in the editor tab title (no token count).
     let cost = 0;
-    let tokens = 0;
     for (const r of data.requests) {
       cost += r.costNanoAiu;
-      tokens += r.inputTokens + r.outputTokens;
     }
-    this.panel.title = `Token Coach · ${formatCost(cost)} · ${formatTokensCompact(tokens)} tok`;
+    this.panel.title =
+      config.usdPerAiu > 0
+        ? `Token Coach · ${formatUsd(cost, config.usdPerAiu)} · ${formatCredits(cost)}`
+        : `Token Coach · ${formatCredits(cost)}`;
 
     const nonce = makeNonce();
-    this.panel.webview.html = renderHtml(this.panel.webview, data, config, nonce, this.openState);
+    this.panel.webview.html = renderHtml(this.panel.webview, data, config, history, nonce, this.openState);
   }
 
   dispose(): void {

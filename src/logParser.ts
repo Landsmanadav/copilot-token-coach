@@ -117,6 +117,29 @@ export interface ParsedData {
   toolCalls: ToolCallRecord[];
   /** Generated chat title per sessionId (best-effort, from the title-*.jsonl sidecar). */
   titles: Record<string, string>;
+  /** Union of tool names *defined* (offered to the model) across all parsed logs. */
+  definedTools?: string[];
+  /** Representative per-request tool-definition size in characters (the largest seen). */
+  toolDefsChars?: number;
+}
+
+/**
+ * The "structural waste" view, Copilot-style: which tools are shipped to the
+ * model on every request (part of the cached prefix) vs which ones the agent
+ * actually called. Tools defined but never called are dead weight you pay to
+ * send each turn — the analog of "skills you installed but never invoke".
+ */
+export interface ToolInventory {
+  /** All tool names offered to the model, sorted. */
+  defined: string[];
+  /** Tool names that were actually invoked at least once, sorted. */
+  called: string[];
+  /** Defined but never called — the dead weight, sorted. */
+  unused: string[];
+  /** Per-request tool-catalog size in characters (≈ chars/4 tokens). */
+  perRequestChars: number;
+  /** False when no tool catalog was recorded (older logs). */
+  hasData: boolean;
 }
 
 /**
@@ -184,6 +207,13 @@ export interface MessageGroup {
    * and shouldn't be flagged.
    */
   chatMessageIndex: number;
+  /**
+   * Idle time (ms) between the previous message's last request and this
+   * message's first one, within the same chat (set by groupByChat). Undefined
+   * for the first message. A gap longer than the prompt-cache TTL (~5 min) is
+   * why a mid-chat cache can go cold from time alone.
+   */
+  idleGapMsBefore?: number;
 }
 
 /** A discovered log file plus its derived session id. */
@@ -568,6 +598,43 @@ async function sidecarChars(absPath: string, cache: Map<string, number>): Promis
   return chars;
 }
 
+/**
+ * Read the tool *names* defined in a `tools_*.json` sidecar (the catalog offered
+ * to the model). Tolerates the two common shapes — a bare array of tools, or
+ * `{ tools: [...] }` — and both `{ name }` and OpenAI-style `{ function: { name } }`.
+ * Cached per path (the file is written once and referenced by many requests).
+ */
+async function readToolNames(absPath: string, cache: Map<string, string[]>): Promise<string[]> {
+  const hit = cache.get(absPath);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const names: string[] = [];
+  try {
+    const raw = await fsp.readFile(absPath, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    const arr = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as Record<string, unknown>)?.tools)
+        ? ((parsed as Record<string, unknown>).tools as unknown[])
+        : [];
+    for (const t of arr) {
+      if (t && typeof t === 'object') {
+        const obj = t as Record<string, unknown>;
+        const fn = obj.function as Record<string, unknown> | undefined;
+        const name = typeof obj.name === 'string' ? obj.name : typeof fn?.name === 'string' ? fn.name : undefined;
+        if (name) {
+          names.push(name);
+        }
+      }
+    }
+  } catch {
+    // Missing / malformed sidecar — just no names.
+  }
+  cache.set(absPath, names);
+  return names;
+}
+
 /** Best-effort short descriptor for a tool call, parsed from its args JSON. */
 function toolTarget(argsStr: unknown): string | undefined {
   if (typeof argsStr !== 'string' || argsStr.length === 0) {
@@ -610,6 +677,11 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
   const lines = raw.split(/\r?\n/);
   const sessionDir = path.dirname(file.filePath);
   const sidecarCache = new Map<string, number>();
+  const toolNameCache = new Map<string, string[]>();
+  // Structural-waste tracking: every tool offered to the model, and the largest
+  // tool-catalog size we see (a stand-in for the per-request tool overhead).
+  const definedTools = new Set<string>();
+  let maxToolDefsChars = 0;
 
   // Boundary tracking: which message and turn each event belongs to.
   let lastUserMessage: string | undefined;
@@ -692,9 +764,16 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
         }
       }
       if (typeof attrs.toolsFile === 'string') {
-        const c = await sidecarChars(path.join(sessionDir, attrs.toolsFile), sidecarCache);
+        const toolsPath = path.join(sessionDir, attrs.toolsFile);
+        const c = await sidecarChars(toolsPath, sidecarCache);
         if (c > 0) {
           breakdown.push({ key: 'tools', label: 'Tool definitions', chars: c });
+          if (c > maxToolDefsChars) {
+            maxToolDefsChars = c;
+          }
+        }
+        for (const name of await readToolNames(toolsPath, toolNameCache)) {
+          definedTools.add(name);
         }
       }
       breakdown.sort((a, b) => b.chars - a.chars);
@@ -723,7 +802,13 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
   }
 
   const title = await readChatTitle(sessionDir);
-  return { requests, toolCalls, titles: title ? { [file.sessionId]: title } : {} };
+  return {
+    requests,
+    toolCalls,
+    titles: title ? { [file.sessionId]: title } : {},
+    definedTools: [...definedTools],
+    toolDefsChars: maxToolDefsChars,
+  };
 }
 
 /** Parse the integer trailing a string like "turn_start:3" -> 3. */
@@ -881,6 +966,8 @@ export async function loadAll(overridePath = '', derivedBase = ''): Promise<Pars
   // so de-duping by id collapses any duplicate that slipped past file discovery.
   const seenReqIds = new Set<string>();
   const seenToolIds = new Set<string>();
+  const definedTools = new Set<string>();
+  let toolDefsChars = 0;
   for (const chunk of parsed) {
     for (const r of chunk.requests) {
       if (seenReqIds.has(r.id)) {
@@ -897,10 +984,37 @@ export async function loadAll(overridePath = '', derivedBase = ''): Promise<Pars
       toolCalls.push(tc);
     }
     Object.assign(titles, chunk.titles);
+    for (const name of chunk.definedTools ?? []) {
+      definedTools.add(name);
+    }
+    if (chunk.toolDefsChars && chunk.toolDefsChars > toolDefsChars) {
+      toolDefsChars = chunk.toolDefsChars;
+    }
   }
 
   requests.sort((a, b) => b.timestamp - a.timestamp);
-  return { requests, toolCalls, titles };
+  return { requests, toolCalls, titles, definedTools: [...definedTools], toolDefsChars };
+}
+
+/**
+ * Compare tools *offered* to the model against tools actually *called*, to
+ * surface dead weight — defined-but-never-called tools sit in the cached prefix
+ * and cost cache-read tokens on every single request.
+ */
+export function analyzeToolInventory(data: ParsedData): ToolInventory {
+  const defined = new Set(data.definedTools ?? []);
+  const called = new Set<string>();
+  for (const tc of data.toolCalls) {
+    called.add(tc.name);
+  }
+  const unused = [...defined].filter((n) => !called.has(n)).sort();
+  return {
+    defined: [...defined].sort(),
+    called: [...called].sort(),
+    unused,
+    perRequestChars: data.toolDefsChars ?? 0,
+    hasData: defined.size > 0,
+  };
 }
 
 /**
@@ -926,6 +1040,16 @@ export function groupByChat(data: ParsedData): ChatGroup[] {
     msgs.sort((a, b) => a.startTime - b.startTime); // oldest first — reads like the thread
     msgs.forEach((m, i) => {
       m.chatMessageIndex = i;
+      if (i > 0) {
+        // Gap from the previous message's last API call to this one's first —
+        // the idle time that can let the prompt cache expire on its own.
+        const prev = msgs[i - 1];
+        const prevEnd = prev.requests.length
+          ? prev.requests[prev.requests.length - 1].timestamp
+          : prev.startTime;
+        const thisStart = m.requests.length ? m.requests[0].timestamp : m.startTime;
+        m.idleGapMsBefore = Math.max(0, thisStart - prevEnd);
+      }
     });
 
     let cost = 0;

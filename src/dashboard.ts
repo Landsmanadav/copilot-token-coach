@@ -734,6 +734,12 @@ function formatDateShort(ts: number): string {
   return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+/** Local midnight (start of the calendar day) for a timestamp. */
+function startOfDay(ts: number): number {
+  const d = new Date(ts);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
 /** Human "Jun 7 → Jun 8, 2026" (or a single date when the span is one day). */
 function formatCoverageRange(summary: Summary): string {
   if (!summary.coverageStartTs || !summary.coverageEndTs) {
@@ -817,10 +823,28 @@ function renderCoverage(summary: Summary): string {
   const days = summary.coverageActiveDays;
   const sessions = summary.chatCount;
   const monthRange = formatMonthToDateRange();
+
+  // If the first logged day falls after the 1st of the month, there's a blind
+  // spot at the start of the month — debug logging was off, or those early logs
+  // rotated away. That gap is the usual reason this total reads below Copilot's
+  // own credit meter, so call it out in plain sight (not just the tooltip).
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const hasStartGap =
+    summary.coverageStartTs > 0 && startOfDay(summary.coverageStartTs) > monthStart;
+  const gapNote = hasStartGap
+    ? ` Logged usage here only starts <b>${escapeHtml(formatDateShort(summary.coverageStartTs))}</b>, so anything
+        earlier this month isn't counted below — for your full account total see Copilot's own credit meter
+        (the Copilot status menu, or run “Token Coach: Check GitHub credit usage”).`
+    : '';
+
   const help =
     `Token Coach shows the current calendar month only — everything resets automatically on the 1st, ` +
     `like GitHub's credit meter. It also only sees sessions Copilot wrote to its debug logs on this ` +
     `machine: within ${monthRange}, logs exist for ${range} (${days} day${days === 1 ? '' : 's'} with logs, ${sessions} session${sessions === 1 ? '' : 's'}). ` +
+    (hasStartGap
+      ? `Because logging only began on ${formatDateShort(summary.coverageStartTs)}, usage earlier this month is missing entirely. `
+      : '') +
     `Sessions on days the log wasn't written, on other machines, or in ask/inline modes aren't captured, ` +
     `so the total reads lower than GitHub's account-wide monthly meter. ` +
     `Run "Token Coach: Check GitHub credit usage" for the real account total.`;
@@ -829,7 +853,7 @@ function renderCoverage(summary: Summary): string {
       <span class="coverage-icon">📅</span>
       <span>The figures below cover <b>${escapeHtml(monthRange)}</b> — this month so far
         <span class="muted">(logs on ${days} day${days === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'})</span> —
-        and reset automatically when a new month starts.</span>
+        and reset automatically when a new month starts.${gapNote}</span>
       <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span>
     </div>`;
 }
@@ -1086,7 +1110,12 @@ function renderHtml(
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
       padding: 16px;
+      /* Long unbreakable strings (file paths, tokens, model ids) must wrap, not
+         push the layout wider than the panel. overflow-x guards anything missed. */
+      overflow-wrap: anywhere;
+      overflow-x: hidden;
     }
+    *, *::before, *::after { box-sizing: border-box; }
     h1 { font-size: 1.3em; margin: 0; }
     .ver {
       font-size: 0.75em; padding: 2px 7px; border-radius: 10px; align-self: center;
@@ -1205,7 +1234,7 @@ function renderHtml(
     .chat > summary::-webkit-details-marker { display: none; }
     .chat-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
     .chat-icon { font-size: 1.05em; }
-    .chat-title { font-size: 1.05em; font-weight: 700; flex: 1 1 240px; }
+    .chat-title { font-size: 1.05em; font-weight: 700; flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
     .chat-cost { font-weight: 700; font-variant-numeric: tabular-nums; }
     .chat-usd { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--vscode-charts-green, #4ec9b0); }
     .chat-tokens { font-variant-numeric: tabular-nums; }
@@ -1227,7 +1256,7 @@ function renderHtml(
     .msg-cost { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 80px; }
     .msg-usd { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--vscode-charts-green, #4ec9b0); min-width: 56px; }
     .msg-tokens { font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); min-width: 70px; }
-    .msg-asked { font-weight: 600; flex: 1 1 240px; }
+    .msg-asked { font-weight: 600; flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
     .msg-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .chip {
       font-size: 0.8em; padding: 1px 7px; border-radius: 10px;
@@ -1258,6 +1287,7 @@ function renderHtml(
     table.mini th, table.mini td {
       text-align: left; padding: 3px 8px;
       border-bottom: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.15)); vertical-align: middle;
+      overflow-wrap: anywhere; word-break: break-word;
     }
     table.mini .num, table.mini th.num { text-align: right; font-variant-numeric: tabular-nums; }
     table.mini tr.highlight td { background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent); }
@@ -1276,7 +1306,7 @@ function renderHtml(
       border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.25));
     }
     .story-icon { flex: 0 0 auto; }
-    .story-main { flex: 1 1 300px; }
+    .story-main { flex: 1 1 300px; min-width: 0; }
     .story-cost { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .bar-cell { display: flex; align-items: center; gap: 6px; }
     .bar { flex: 1; height: 8px; border-radius: 4px; background: var(--vscode-widget-border, rgba(127,127,127,0.25)); overflow: hidden; min-width: 60px; }
@@ -1290,28 +1320,31 @@ function renderHtml(
       background: var(--vscode-badge-background, rgba(127,127,127,0.25));
       color: var(--vscode-badge-foreground, inherit); opacity: 0.8;
     }
-    /* Reliable CSS tooltip (native title= is flaky inside webviews). */
-    .tip { position: relative; }
-    .tip[data-tip]:hover::after {
-      content: attr(data-tip);
-      position: absolute; left: 0; top: calc(100% + 5px); z-index: 30;
-      width: max-content; max-width: min(320px, 80vw);
-      padding: 7px 10px; border-radius: 5px;
+    /* Tooltips: a single JS-positioned floating element (#tt), not a CSS
+       ::after. An ::after tooltip is clipped by any overflow ancestor and by the
+       panel's own edges, so long disclaimers got cut off near the bottom/right.
+       A position:fixed element clamped to the viewport is always fully visible. */
+    .tip { cursor: help; }
+    #tt {
+      position: fixed; left: 0; top: 0; z-index: 1000;
+      max-width: min(380px, 92vw); padding: 8px 11px; border-radius: 6px;
       background: var(--vscode-editorHoverWidget-background, #252526);
       color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
       border: 1px solid var(--vscode-editorHoverWidget-border, rgba(127,127,127,0.4));
-      box-shadow: 0 3px 10px rgba(0,0,0,0.45);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
       font-size: 12px; font-weight: 400; line-height: 1.5;
       white-space: normal; text-transform: none; letter-spacing: normal;
+      pointer-events: none; opacity: 0; transition: opacity 80ms ease;
     }
-    /* Right-side tooltips open leftward so they don't run off the panel edge. */
-    .tip-left[data-tip]:hover::after { left: auto; right: 0; }
+    #tt.show { opacity: 1; }
     .caption { margin: 6px 0 0; }
     .attach { margin-top: 8px; }
     .attach-title { font-size: 0.8em; text-transform: uppercase; letter-spacing: .04em; }
     .attach ul { margin: 4px 0 0; padding-left: 16px; }
-    .attach li { margin: 1px 0; }
-    .file { font-family: var(--vscode-editor-font-family, monospace); }
+    .attach li { margin: 1px 0; overflow-wrap: anywhere; }
+    /* Absolute file paths are long and unspaced — break them anywhere so they
+       wrap inside the list instead of leaking past the panel edge. */
+    .file { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; }
 
     /* Timeline */
     .timeline { margin-top: 4px; }
@@ -1332,7 +1365,7 @@ function renderHtml(
     }
     .item-tool { padding-left: 22px; opacity: 0.95; }
     .item-icon { width: 1.2em; }
-    .item-main { flex: 1 1 200px; }
+    .item-main { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
     .item-stats { font-variant-numeric: tabular-nums; }
     .item-cost { font-variant-numeric: tabular-nums; min-width: 70px; text-align: right; }
     .item-warn { flex-basis: 100%; padding-left: 22px; }
@@ -1354,6 +1387,7 @@ function renderHtml(
     code {
       background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.15));
       padding: 1px 5px; border-radius: 3px; font-family: var(--vscode-editor-font-family, monospace);
+      overflow-wrap: anywhere;
     }
   </style>
 </head>
@@ -1368,6 +1402,58 @@ function renderHtml(
   ${body}
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+
+    // Floating tooltip: one fixed element positioned in JS so it can never be
+    // clipped by an overflow ancestor or run off the panel edge (the old CSS
+    // ::after tooltip got cut off near the bottom/right). Text is set via
+    // textContent, so the data-tip value is shown verbatim and can't inject HTML.
+    const tt = document.createElement('div');
+    tt.id = 'tt';
+    document.body.appendChild(tt);
+    let tipEl = null;
+
+    function showTip(target) {
+      const text = target.getAttribute('data-tip');
+      if (!text) { return; }
+      tipEl = target;
+      tt.textContent = text;
+      tt.classList.add('show');
+      const PAD = 8, GAP = 6;
+      const r = target.getBoundingClientRect();
+      const tw = tt.offsetWidth, th = tt.offsetHeight;
+      const vw = document.documentElement.clientWidth;
+      const vh = document.documentElement.clientHeight;
+      // Prefer below the target; flip above if it would overflow the bottom.
+      let top = r.bottom + GAP;
+      if (top + th > vh - PAD) {
+        top = r.top - GAP - th >= PAD ? r.top - GAP - th : Math.max(PAD, vh - th - PAD);
+      }
+      // Left-align to the target, then clamp inside the viewport on both sides.
+      let left = r.left;
+      if (left + tw > vw - PAD) { left = vw - tw - PAD; }
+      if (left < PAD) { left = PAD; }
+      tt.style.left = left + 'px';
+      tt.style.top = top + 'px';
+    }
+
+    function hideTip() {
+      tt.classList.remove('show');
+      tipEl = null;
+    }
+
+    document.addEventListener('mouseover', (e) => {
+      const t = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+      if (t && t !== tipEl) { showTip(t); }
+    });
+    document.addEventListener('mouseout', (e) => {
+      if (!tipEl) { return; }
+      const to = e.relatedTarget;
+      const stillInside = to && to.closest && to.closest('[data-tip]') === tipEl;
+      if (!stillInside) { hideTip(); }
+    });
+    // The tooltip is positioned against the viewport, so any scroll makes it
+    // stale — hide it rather than let it drift away from its anchor.
+    window.addEventListener('scroll', hideTip, { passive: true, capture: true });
 
     const btn = document.getElementById('refresh');
     if (btn) {

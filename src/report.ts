@@ -2,10 +2,8 @@
  * report.ts
  * -----------------------------------------------------------------------------
  * Builds a portable Markdown report of your Copilot usage — the "save things you
- * can keep" piece. Token Optimizer auto-writes an HTML dashboard for Claude
- * Code; we can't hook Copilot's lifecycle, so instead we let you export a
- * snapshot on demand (command or dashboard button), plus a daily history trend
- * the extension records over time.
+ * can keep" piece. Exported on demand (command or dashboard button), plus a
+ * daily history trend the extension records over time.
  */
 
 import { ParsedData, groupByChat, analyzeToolInventory } from './logParser';

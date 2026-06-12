@@ -1,0 +1,129 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; }
+      .lbl  { fill:#858585; font-size:13px; letter-spacing:0.6px; }
+      .val  { fill:#E6E6E6; font-size:32px; font-weight:700; }
+      .sub  { fill:#8A8A8A; font-size:13px; }
+      .green{ fill:#4EC9B0; }
+      .blue { fill:#3794FF; }
+      .yel  { fill:#D7BA7D; }
+      .txt  { fill:#D4D4D4; }
+      .mut  { fill:#8A8A8A; }
+    </style>
+  </defs>
+
+  <!-- editor background -->
+  <rect width="1200" height="760" fill="#1E1E1E"/>
+
+  <!-- header -->
+  <text x="32" y="52" class="txt" font-size="26" font-weight="700">📊 Token Coach</text>
+  <rect x="232" y="32" width="58" height="26" rx="13" fill="#2D2D30"/>
+  <text x="261" y="50" class="mono mut" font-size="13" text-anchor="middle">v0.5.0</text>
+  <rect x="980" y="30" width="92" height="30" rx="4" fill="#0E639C"/>
+  <text x="1026" y="50" fill="#FFFFFF" font-size="13" text-anchor="middle">↻ Refresh</text>
+  <rect x="1084" y="30" width="84" height="30" rx="4" fill="#3A3D41"/>
+  <text x="1126" y="50" fill="#E6E6E6" font-size="13" text-anchor="middle">⤓ Export</text>
+
+  <!-- coverage banner -->
+  <rect x="32" y="80" width="1136" height="62" rx="8" fill="#14304A" stroke="#2D5F86"/>
+  <text x="54" y="108" class="txt" font-size="15">📅 The figures below cover <tspan font-weight="700">Jun 1 → Jun 12, 2026</tspan> — this month so far <tspan class="mut">(logs on 6 days · 20 sessions)</tspan>.</text>
+  <text x="54" y="130" class="mut" font-size="14">Logged usage here only starts <tspan fill="#D4D4D4" font-weight="700">Jun 7</tspan> — for your full account total see Copilot's own credit meter.</text>
+
+  <!-- summary cards -->
+  <g>
+    <!-- card 1: used this month -->
+    <rect x="32" y="162" width="271" height="124" rx="8" fill="#252526" stroke="#3C3C3C"/>
+    <text x="52" y="190" class="lbl">USED · THIS MONTH</text>
+    <text x="52" y="228" class="val mono">$1.01</text>
+    <text x="52" y="262" class="sub mono">100.5 credits · Jun 1 → Jun 12</text>
+
+    <!-- card 2: today -->
+    <rect x="320" y="162" width="271" height="124" rx="8" fill="#252526" stroke="#3C3C3C"/>
+    <text x="340" y="190" class="lbl">TODAY</text>
+    <text x="340" y="228" class="val mono">$0.12</text>
+    <text x="340" y="262" class="sub mono">avg $0.08/day this month</text>
+
+    <!-- card 3: efficiency -->
+    <rect x="608" y="162" width="271" height="124" rx="8" fill="#252526" stroke="#2E5E54"/>
+    <text x="628" y="190" class="lbl">EFFICIENCY</text>
+    <text x="628" y="228" class="val"><tspan class="green" font-weight="800">A</tspan> <tspan class="mut mono" font-size="18">88/100</tspan></text>
+    <text x="628" y="262" class="sub mono">Cache reuse 90 · Clean 80 (16/20)</text>
+
+    <!-- card 4: cache hit rate -->
+    <rect x="896" y="162" width="271" height="124" rx="8" fill="#252526" stroke="#3C3C3C"/>
+    <text x="916" y="190" class="lbl">CACHE HIT RATE</text>
+    <text x="916" y="228" class="val mono">82%</text>
+    <text x="916" y="262" class="sub">cached input is ~80% cheaper</text>
+  </g>
+
+  <!-- model spend panel -->
+  <rect x="32" y="304" width="1136" height="158" rx="10" fill="#212121" stroke="#3C3C3C"/>
+  <text x="54" y="334" class="txt" font-size="16" font-weight="700">💸 Model spend <tspan class="mut" font-size="13" font-weight="400">— where your premium budget goes</tspan></text>
+
+  <!-- row 1 -->
+  <rect x="54" y="352" width="160" height="22" rx="4" fill="#1E1E1E" stroke="#3C3C3C"/>
+  <text x="62" y="368" class="mono txt" font-size="13">claude-haiku-4.5</text>
+  <text x="226" y="368" class="mono mut" font-size="12">billed</text>
+  <text x="560" y="368" class="mono mut" font-size="13" text-anchor="end">99 req · 1.9M tok</text>
+  <text x="700" y="368" class="mono txt" font-size="13" text-anchor="end">89.26 AIU</text>
+  <rect x="720" y="358" width="380" height="9" rx="4" fill="#333"/>
+  <rect x="720" y="358" width="338" height="9" rx="4" fill="#3794FF"/>
+  <text x="1110" y="368" class="mono mut" font-size="12">89%</text>
+
+  <!-- row 2 -->
+  <rect x="54" y="386" width="120" height="22" rx="4" fill="#1E1E1E" stroke="#3C3C3C"/>
+  <text x="62" y="402" class="mono txt" font-size="13">gpt-5-mini</text>
+  <text x="186" y="402" class="mono mut" font-size="12">billed</text>
+  <text x="560" y="402" class="mono mut" font-size="13" text-anchor="end">33 req · 771K tok</text>
+  <text x="700" y="402" class="mono txt" font-size="13" text-anchor="end">10.22 AIU</text>
+  <rect x="720" y="392" width="380" height="9" rx="4" fill="#333"/>
+  <rect x="720" y="392" width="42" height="9" rx="4" fill="#3794FF"/>
+  <text x="1110" y="402" class="mono mut" font-size="12">10%</text>
+
+  <!-- row 3 -->
+  <rect x="54" y="420" width="170" height="22" rx="4" fill="#1E1E1E" stroke="#3C3C3C"/>
+  <text x="62" y="436" class="mono txt" font-size="13">gpt-4o-mini</text>
+  <text x="236" y="436" class="mono mut" font-size="12">billed</text>
+  <text x="560" y="436" class="mono mut" font-size="13" text-anchor="end">6 req · 15K tok</text>
+  <text x="700" y="436" class="mono txt" font-size="13" text-anchor="end">0.31 AIU</text>
+  <rect x="720" y="426" width="380" height="9" rx="4" fill="#333"/>
+  <rect x="720" y="426" width="6" height="9" rx="3" fill="#3794FF"/>
+  <text x="1110" y="436" class="mono mut" font-size="12">0.3%</text>
+
+  <!-- chat row 1 (expanded look) -->
+  <rect x="32" y="484" width="1136" height="118" rx="8" fill="#252526" stroke="#3C3C3C"/>
+  <rect x="32" y="484" width="4" height="118" rx="2" fill="#D7BA7D"/>
+  <text x="54" y="514" font-size="16">🧵</text>
+  <rect x="80" y="500" width="26" height="22" rx="4" fill="#1E1E1E" stroke="#2E5E54"/>
+  <text x="93" y="516" class="green mono" font-size="13" font-weight="800" text-anchor="middle">A</text>
+  <text x="118" y="516" class="txt" font-size="15" font-weight="700">Markdown report on project</text>
+  <text x="700" y="516" class="mono txt" font-size="15" font-weight="700" text-anchor="end">3.78 AIU</text>
+  <text x="800" y="516" class="mono green" font-size="14" text-anchor="end">$0.04</text>
+  <text x="900" y="516" class="mono mut" font-size="14" text-anchor="end">29K tok</text>
+  <text x="54" y="544" class="mut" font-size="13">1 message · 9 requests · 6 tool calls</text>
+  <rect x="300" y="531" width="96" height="20" rx="10" fill="#2D2D30"/>
+  <text x="348" y="545" class="mut mono" font-size="12" text-anchor="middle">cache 0%</text>
+
+  <!-- "why it cost" story line inside -->
+  <rect x="54" y="558" width="1092" height="32" rx="6" fill="#1E1E1E" stroke="#3C3C3C"/>
+  <text x="68" y="578" font-size="14">🧊 <tspan class="txt" font-weight="700">Cache empty — paid full price.</tspan> <tspan class="mut">First turn billed the whole tool catalog + system prompt at full rate.</tspan> <tspan class="mono txt" font-weight="700">3.78 AIU · 100%</tspan></text>
+
+  <!-- chat row 2 (collapsed look) -->
+  <rect x="32" y="614" width="1136" height="64" rx="8" fill="#252526" stroke="#3C3C3C"/>
+  <rect x="32" y="614" width="4" height="64" rx="2" fill="#4EC9B0"/>
+  <text x="54" y="644" font-size="16">🧵</text>
+  <rect x="80" y="632" width="26" height="22" rx="4" fill="#1E1E1E" stroke="#2E5E54"/>
+  <text x="93" y="648" class="green mono" font-size="13" font-weight="800" text-anchor="middle">A</text>
+  <text x="118" y="648" class="txt" font-size="15" font-weight="700">Project directory and file tasks</text>
+  <text x="700" y="648" class="mono txt" font-size="15" font-weight="700" text-anchor="end">0.66 AIU</text>
+  <text x="800" y="648" class="mono green" font-size="14" text-anchor="end">$0.01</text>
+  <text x="900" y="648" class="mono mut" font-size="14" text-anchor="end">31K tok</text>
+  <rect x="950" y="635" width="96" height="20" rx="10" fill="#123F36"/>
+  <text x="998" y="649" class="green mono" font-size="12" text-anchor="middle">cache 86%</text>
+
+  <!-- footer hint -->
+  <text x="32" y="712" class="mut" font-size="13">Grouped by chat → message → turn. Click a message for cost drivers (tools &amp; context) and a turn-by-turn breakdown.</text>
+  <text x="32" y="734" class="mut" font-size="12">Usage in credits (1 credit = 1 AIU = $0.01). Read-only — never modifies Copilot, no network calls.</text>
+</svg>

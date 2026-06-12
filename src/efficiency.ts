@@ -2,11 +2,8 @@
  * efficiency.ts
  * -----------------------------------------------------------------------------
  * Collapses the per-message coaching signals (cache reuse + waste warnings) into
- * a single, glanceable **efficiency grade** (A–F) and score (0–100).
- *
- * This is the "ContextQ / Eff grade" idea borrowed from the Token Optimizer
- * extension — but computed entirely from OUR GitHub Copilot data, so it stays a
- * single coherent product rather than two bolted-together data sources.
+ * a single, glanceable **efficiency grade** (A–F) and score (0–100), computed
+ * entirely from the GitHub Copilot debug-log data.
  *
  * The score is deliberately simple and explainable (the tooltip/card spells it
  * out), weighted toward cache because cached input is by far the biggest cost

@@ -1,10 +1,22 @@
-# Token Coach
+<p align="center">
+  <img src="images/icon-source.png" alt="Token Coach" width="170" />
+</p>
 
-A VS Code extension that reads **GitHub Copilot's local debug logs**, analyzes
-token usage and cost, and coaches you toward cheaper usage patterns.
+<h1 align="center">Token Coach</h1>
 
-It is strictly **read-only** — it never modifies Copilot or sends anything over
-the network. It only reads the JSONL debug logs Copilot already writes to disk.
+<p align="center">
+  Read <b>GitHub Copilot's</b> local debug logs, see your real token <b>cost</b> &amp;
+  <b>cache efficiency</b>, and get coached toward cheaper usage —<br/>
+  strictly <b>read-only</b>, with no network calls.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=NadavLAN.token-coach"><img alt="VS Marketplace Version" src="https://img.shields.io/visual-studio-marketplace/v/NadavLAN.token-coach?label=Marketplace"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=NadavLAN.token-coach"><img alt="VS Marketplace Installs" src="https://img.shields.io/visual-studio-marketplace/i/NadavLAN.token-coach"></a>
+</p>
+
+![Token Coach dashboard — summary cards, per-model spend, and per-chat cost breakdown](images/dashboard.png)
 
 > 📘 See **[GUIDE.md](GUIDE.md)** for what we built & how it works, plus detailed
 > **local-install** and **publishing** instructions.
@@ -29,9 +41,9 @@ So this tool surfaces:
 - **Rules engine** — flags expensive requests, low cache hits on large inputs,
   oversized inputs, and huge-input/tiny-output requests. All thresholds are
   configurable.
-- **Status bar** — shows the all-time total cost and tokens (so it always
-  reflects your data, even if Copilot wasn't used today); hover for a today /
-  this-month / all-time breakdown, click to open the dashboard.
+- **Status bar** — shows **this month's** cost and tokens (it resets on the 1st,
+  like GitHub's credit meter), with a distinct "new month, fresh start" state;
+  hover for a today / this-month breakdown, click to open the dashboard.
 - **Dashboard, grouped by chat → message** — the top level is each **chat**
   (one Copilot conversation / debug session), labelled with its generated title
   (e.g. "Basic React app template") or the first message, and rolled up to its
@@ -59,9 +71,10 @@ So this tool surfaces:
   The editor tab title shows the live totals (e.g. `Token Coach · 14.67 AIU ·
   524k tok`), and expanded rows + scroll position are preserved across the live
   refreshes.
-- **Dollars & plan budget** — AIU is converted to USD (1 AIU ≈ $0.01) and shown
-  alongside the raw cost, with a "this month vs your $19/mo plan" budget gauge.
-  See [Cost in dollars](#cost-in-dollars-credits).
+- **Dollars** — AIU is converted to USD (1 AIU ≈ $0.01) and shown alongside the
+  raw cost (credits). The dashboard shows **what you've used** this month — no
+  quota or plan denominator; your monthly plan price only tints the status bar as
+  spend grows. See [Cost in dollars](#cost-in-dollars-credits).
 
   > Note on context sizes: Copilot only itemizes the in-prompt context blocks on
   > the first turn (attachments, workspace, memory, …); later turns log just the
@@ -72,11 +85,9 @@ So this tool surfaces:
 - **Live updates** — a file watcher (plus a backup poll) re-parses logs when
   Copilot writes new entries, and notifies you when a new request is expensive.
 
-### New in 0.3 — concepts ported from [Token Optimizer](https://github.com/alexgreensh/token-optimizer)
+### Efficiency & spend insights
 
-Token Optimizer is a *Claude Code* plugin; it can't run on Copilot (which exposes
-no hooks to third parties), so these adapt its best ideas to Copilot's read-only
-debug logs:
+Higher-level views layered on top of the raw cost data:
 
 - **Efficiency grade (A–F)** — one glanceable health score = 60% cache reuse +
   40% "clean runs" (messages with no real warning). Shown in the status bar
@@ -165,11 +176,11 @@ npm install -g @vscode/vsce   # if you don't have it
 npm run package               # runs `vsce package`
 ```
 
-This produces `token-coach-0.1.0.vsix`, which you can install with
+This produces `token-coach-0.5.0.vsix`, which you can install with
 **Extensions: Install from VSIX…** or:
 
 ```bash
-code --install-extension token-coach-0.1.0.vsix
+code --install-extension token-coach-0.5.0.vsix
 ```
 
 ## Settings
@@ -275,4 +286,5 @@ highlight any expensive ones.
 
 ## License
 
-PolyForm Noncommercial License 1.0.0 — free for noncommercial use. Commercial use requires a separate license. See [LICENSE](LICENSE).
+[Apache License 2.0](LICENSE) © 2026 Nadav Landesman — free for personal and
+commercial use, with a patent grant.

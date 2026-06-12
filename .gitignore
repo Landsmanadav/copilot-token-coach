@@ -2,3 +2,15 @@ node_modules/
 out/
 *.vsix
 .DS_Store
+
+# Generated usage reports (export-command output)
+token-coach-report-*.md
+
+# Personal docs / generated project reports — not part of the published extension
+docs/
+
+# Local MCP server config (contains absolute paths / private servers)
+.vscode/mcp.json
+
+# Raw AI-generated source image (cropped into icon.png / images/icon-source.png)
+Gemini_Generated_Image_*.png

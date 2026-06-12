@@ -1,10 +1,9 @@
 /**
  * githubBilling.ts
  * -----------------------------------------------------------------------------
- * The closest Copilot analog to Token Optimizer's "usage limits" panel: pull the
- * authoritative Copilot premium-request spend straight from GitHub's enhanced
- * billing usage API, so the dollar estimate can be calibrated automatically
- * instead of by hand.
+ * Pulls the authoritative Copilot premium-request spend straight from GitHub's
+ * enhanced billing usage API, so the dollar estimate can be calibrated
+ * automatically instead of by hand.
  *
  *   GET /users/{username}/settings/billing/usage?year=&month=
  *

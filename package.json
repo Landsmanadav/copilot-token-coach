@@ -2,9 +2,23 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "0.4.2",
-  "publisher": "nadavLan",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "version": "1.0.0",
+  "publisher": "NadavLAN",
+  "license": "Apache-2.0",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Landsmanadav/copilot-token-coach.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Landsmanadav/copilot-token-coach/issues"
+  },
+  "homepage": "https://github.com/Landsmanadav/copilot-token-coach#readme",
+  "qna": "marketplace",
+  "galleryBanner": {
+    "color": "#1E1E1E",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -14,10 +28,14 @@
   ],
   "keywords": [
     "copilot",
+    "github copilot",
     "tokens",
     "cost",
+    "credits",
     "cache",
-    "ai"
+    "usage",
+    "ai",
+    "aiu"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -157,6 +175,7 @@
   "devDependencies": {
     "@types/node": "^18.19.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
     "typescript": "^5.4.0"
   }
 }

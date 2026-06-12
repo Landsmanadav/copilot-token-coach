@@ -3,6 +3,7 @@
 
 .vscode/**
 .vscode-test/**
+.claude/**
 src/**
 node_modules/**
 
@@ -17,6 +18,22 @@ package-lock.json
 .DS_Store
 *.vsix
 *.zip
+
+# Raw AI source image (already cropped into icon.png / images/icon-source.png)
+Gemini_Generated_Image_*.png
+# Generated usage reports
+token-coach-report-*.md
+# Developer guide — the README link resolves to the GitHub copy
+GUIDE.md
+
+# Personal Hebrew explainer / generated reports — not needed in the published package.
+docs/**
+
+# Local MCP config — never ship local paths / private servers.
+.vscode/mcp.json
+
+# Ship the rasterized PNGs (icon + screenshot), not the editable SVG sources.
+images/*.svg
 
 # Stray build artifacts that can appear in the project root
 vsce

@@ -387,16 +387,100 @@ export async function findLogFiles(overridePath = '', derivedBase = ''): Promise
 }
 
 /**
+ * Tag blocks Copilot injects into a `user_message` that aren't what the human
+ * typed: system reminders, attached-file reference lists, environment context,
+ * editor state, memory, etc. When a message is *only* such a block (e.g. you
+ * attached a file but typed nothing) the raw content is pure XML noise — so we
+ * strip these so the displayed "what you asked" is the real question.
+ */
+const INJECTED_BLOCKS = [
+  'system-reminder',
+  'reminderInstructions',
+  'context',
+  'attachments',
+  'attachment',
+  'editorContext',
+  'workspace_info',
+  'userMemory',
+  'repoMemory',
+  'sessionMemory',
+];
+
+/** Quick test: does this text contain any injected block at all? */
+const INJECTED_RE = new RegExp(`<(${INJECTED_BLOCKS.join('|')})\\b`, 'i');
+
+/** Last path segment of a posix/windows path, with any trailing `:line` removed. */
+function baseName(p: string): string {
+  const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  const i = norm.lastIndexOf('/');
+  return i >= 0 ? norm.slice(i + 1) : norm;
+}
+
+/**
+ * Remove Copilot's injected blocks (tag *and* inner content) from a message,
+ * leaving only what the user actually wrote. Only the known block names are
+ * touched, so legitimate angle-bracket content in a question (e.g. `<div>`) is
+ * preserved. Whitespace is collapsed to a single line for display.
+ */
+function stripInjectedBlocks(text: string): string {
+  let out = text;
+  for (const tag of INJECTED_BLOCKS) {
+    // Whole block: <tag ...> … </tag>.
+    out = out.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>`, 'gi'), ' ');
+    // Any leftover stray open/close/self-closing tag of the same name (truncated logs).
+    out = out.replace(new RegExp(`</?${tag}\\b[^>]*>`, 'gi'), ' ');
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+/** Pull referenced file names out of an injected references / attachments block. */
+function extractReferencedFiles(text: string): string[] {
+  const files = new Set<string>();
+  // "- /Users/…/README.md:1" style reference lines.
+  const lineRe = /[-*]\s+((?:\/|[A-Za-z]:\\)[^\s:<>"]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = lineRe.exec(text)) !== null) {
+    files.add(baseName(m[1]));
+  }
+  // filePath="…" / path="…" attributes on <attachment> tags.
+  const attrRe = /(?:filePath|path)="([^"]+)"/g;
+  while ((m = attrRe.exec(text)) !== null) {
+    files.add(baseName(m[1]));
+  }
+  return [...files].filter((f) => f.length > 0);
+}
+
+/**
  * Pull the human-readable text out of a `user_message` event. Copilot has used
- * a few shapes over time, so we try the common ones.
+ * a few shapes over time, so we try the common ones; we also strip injected
+ * context blocks (see {@link stripInjectedBlocks}) so the result is the question
+ * the developer actually typed, not Copilot's `<system-reminder>` plumbing.
  */
 function extractUserMessage(attrs: Record<string, unknown> | undefined): string | undefined {
   if (!attrs) {
     return undefined;
   }
   const content = attrs.content ?? attrs.message ?? attrs.text;
-  if (typeof content === 'string' && content.trim().length > 0) {
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    return undefined;
+  }
+
+  // Fast path: no injected blocks → return verbatim (unchanged behaviour).
+  if (!INJECTED_RE.test(content)) {
     return content.trim();
+  }
+
+  const cleaned = stripInjectedBlocks(content);
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+
+  // Pure plumbing, no typed text — but the user likely attached files. Summarise
+  // them so the row says something useful instead of showing raw XML.
+  const refs = extractReferencedFiles(content);
+  if (refs.length > 0) {
+    const shown = refs.slice(0, 3).join(', ');
+    return `📎 Referenced ${refs.length} file${refs.length === 1 ? '' : 's'}: ${shown}${refs.length > 3 ? '…' : ''}`;
   }
   return undefined;
 }

@@ -4,6 +4,20 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-15
+
+### Removed
+- **GitHub credit-usage lookup** — the *Token Coach: Check GitHub credit usage*
+  command, the `githubBilling.ts` module, and the `tokenCoach.githubToken` /
+  `tokenCoach.githubUsername` / `tokenCoach.githubOrg` settings are all gone.
+  Token Coach now makes **no network calls** and reads nothing from your GitHub
+  account — every figure comes straight from the local Copilot debug logs.
+
+### Changed
+- Dashboard, status-bar tooltip, and coverage notes no longer reference the
+  removed command. For your real account-wide monthly total they now point to
+  Copilot's own credit meter (the Copilot status menu on github.com).
+
 ## [1.0.0] - 2026-06-12
 
 First stable release, published to the VS Code Marketplace.
@@ -62,6 +76,7 @@ First stable release, published to the VS Code Marketplace.
 - Initial packaged release: log parser, coaching rules, dashboard webview, status
   bar, Markdown export, and optional GitHub credit-usage lookup.
 
+[1.0.1]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.0
 [0.5.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v0.5.0
 [0.2.4]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v0.2.4

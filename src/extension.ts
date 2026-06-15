@@ -22,7 +22,6 @@ import {
 import { analyzeRecord, analyzeMessageDrivers, CoachConfig, CoachWarning, DEFAULT_COACH_CONFIG } from './coach';
 import { computeEfficiency, EfficiencyScore } from './efficiency';
 import { buildMarkdownReport, DailySnapshot } from './report';
-import { fetchCopilotMonthUsage, fetchGitHubLogin } from './githubBilling';
 import {
   DashboardPanel,
   formatCost,
@@ -243,11 +242,11 @@ function buildStatusTooltip(s: TooltipStats, config: CoachConfig): vscode.Markdo
 
   blocks.push(
     `${s.recordCount.toLocaleString()} requests logged this month — resets on the 1st, like GitHub's meter. ` +
-      `A partial record; “Check GitHub credit usage” shows your real monthly total.`
+      `This is only what Copilot wrote to this machine's local debug logs, so it's a partial record ` +
+      `(other machines, and ask/inline modes, aren't here) and reads lower than your full account total.`
   );
   blocks.push(
     `[Open dashboard](command:tokenCoach.showDashboard) · ` +
-      `[Check GitHub](command:tokenCoach.checkGitHubUsage) · ` +
       `[Refresh](command:tokenCoach.refresh)`
   );
 
@@ -428,81 +427,6 @@ async function showDashboard(): Promise<void> {
   updateStatusBar(data, config, raw.requests.length > data.requests.length);
 }
 
-/** Sum this month's RAW (un-scaled) logged AIU. The basis for the scale factor. */
-/**
- * Read this month's REAL Copilot credit usage from GitHub and show it next to
- * what the local logs captured — read-only, it changes nothing on the dashboard.
- * Copilot's debug logs are only a partial record (sessions from other
- * days/workspaces, and ask/inline modes, aren't written here), so the logged
- * total is normally lower than GitHub's meter; this surfaces the true figure
- * without faking anything. Needs a fine-grained PAT with billing read access;
- * for org-managed (Business/Enterprise) seats set `tokenCoach.githubOrg`.
- */
-async function checkGitHubUsage(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
-
-  let token = cfg.get<string>('githubToken', '').trim();
-  if (!token) {
-    const entered = await vscode.window.showInputBox({
-      title: 'GitHub billing — fine-grained token',
-      prompt:
-        'Paste a fine-grained Personal Access Token with billing read access (the "Plan" account ' +
-        'permission for personal usage, or org billing read if your Copilot seat is org-managed). ' +
-        'Saved to your settings (tokenCoach.githubToken).',
-      password: true,
-      ignoreFocusOut: true,
-    });
-    if (!entered) {
-      return;
-    }
-    token = entered.trim();
-    await cfg.update('githubToken', token, vscode.ConfigurationTarget.Global);
-  }
-
-  const org = cfg.get<string>('githubOrg', '').trim();
-
-  // What our local logs captured this month, for an honest side-by-side.
-  const data = await loadAll(getOverridePath(), workspaceStorageBase);
-  const monthStart = startOfMonthMs();
-  let loggedCredits = 0;
-  for (const r of data.requests) {
-    if (r.timestamp >= monthStart) {
-      loggedCredits += r.costNanoAiu / 1e9;
-    }
-  }
-
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Token Coach: reading GitHub billing…' },
-    async () => {
-      try {
-        const account = org
-          ? { org }
-          : { username: cfg.get<string>('githubUsername', '').trim() || (await fetchGitHubLogin(token)) };
-        const now = new Date();
-        const usage = await fetchCopilotMonthUsage(token, account, now.getFullYear(), now.getMonth() + 1);
-        const who = org ? `org ${org}` : account.username;
-        if (usage.grossCredits <= 0) {
-          vscode.window.showInformationMessage(
-            `Token Coach: GitHub reports 0 Copilot credits used this month for ${who}. ` +
-              (org ? '' : 'If your seat is billed through an organization, set tokenCoach.githubOrg.')
-          );
-          return;
-        }
-        const captured = loggedCredits > 0 ? Math.round((loggedCredits / usage.grossCredits) * 100) : 0;
-        vscode.window.showInformationMessage(
-          `GitHub: ${usage.grossCredits.toFixed(1)} credits used this month ($${(usage.grossCredits * 0.01).toFixed(2)}). ` +
-            `These local logs captured ${loggedCredits.toFixed(1)} (${captured}%) — the rest is Copilot usage not ` +
-            `written to this machine's agent debug logs (other days/workspaces, or ask/inline modes).`
-        );
-      } catch (err) {
-        vscode.window.showErrorMessage(
-          `Token Coach: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
-  );
-}
-
 // ---------------------------------------------------------------------------
 // History + export ("saving things")
 // ---------------------------------------------------------------------------
@@ -672,8 +596,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('tokenCoach.showDashboard', () => void showDashboard()),
     vscode.commands.registerCommand('tokenCoach.refresh', () => void refresh()),
-    vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport()),
-    vscode.commands.registerCommand('tokenCoach.checkGitHubUsage', () => void checkGitHubUsage())
+    vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport())
   );
 
   // React to relevant settings changes: re-read thresholds, restart watchers /

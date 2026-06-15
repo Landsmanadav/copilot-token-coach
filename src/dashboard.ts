@@ -777,8 +777,9 @@ function renderUsedCard(summary: Summary, config: CoachConfig): string {
     `logs on this machine${loggedRange ? ` — logs were written on ${loggedRange}` : ''}. Resets ` +
     `automatically on the 1st of each month, like GitHub's monthly credit meter. The logs are a ` +
     `partial record — sessions on days the log wasn't written, on other machines, or in ask/inline ` +
-    `(non-agent) modes aren't here — so this reads lower than GitHub's account-wide meter. ` +
-    `1 credit = 1 AIU = $0.01. Run "Token Coach: Check GitHub credit usage" for your real account total.`;
+    `(non-agent) modes aren't here — so this reads lower than your account-wide total. ` +
+    `1 credit = 1 AIU = $0.01. This figure comes only from the local debug logs; for your real ` +
+    `account total, see Copilot's own credit meter (the Copilot status menu on github.com).`;
   return `
     <div class="card card-budget">
       <div class="card-label">Used · this month <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
@@ -835,7 +836,7 @@ function renderCoverage(summary: Summary): string {
   const gapNote = hasStartGap
     ? ` Logged usage here only starts <b>${escapeHtml(formatDateShort(summary.coverageStartTs))}</b>, so anything
         earlier this month isn't counted below — for your full account total see Copilot's own credit meter
-        (the Copilot status menu, or run “Token Coach: Check GitHub credit usage”).`
+        (the Copilot status menu on github.com).`
     : '';
 
   const help =
@@ -846,8 +847,8 @@ function renderCoverage(summary: Summary): string {
       ? `Because logging only began on ${formatDateShort(summary.coverageStartTs)}, usage earlier this month is missing entirely. `
       : '') +
     `Sessions on days the log wasn't written, on other machines, or in ask/inline modes aren't captured, ` +
-    `so the total reads lower than GitHub's account-wide monthly meter. ` +
-    `Run "Token Coach: Check GitHub credit usage" for the real account total.`;
+    `so the total reads lower than your account-wide monthly meter. Everything here is read straight from ` +
+    `the local debug logs — for your real account total, see Copilot's own credit meter on github.com.`;
   return `
     <div class="coverage">
       <span class="coverage-icon">📅</span>

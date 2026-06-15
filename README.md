@@ -111,14 +111,12 @@ Higher-level views layered on top of the raw cost data:
 - **Save / export** — *Token Coach: Export Report* writes a Markdown snapshot
   (summary, efficiency, model spend, unused tools, top chats, trend) you can keep;
   the extension also records a **daily efficiency trend** shown on the dashboard.
-- **Check GitHub credit usage** — the dashboard counts only what's in the local
-  debug logs, which are a *partial* record (other days/workspaces, and ask/inline
-  non-agent modes, aren't written here), so it normally reads lower than GitHub's
-  meter. *Token Coach: Check GitHub credit usage* reads your **real** monthly
-  credit total from GitHub's billing API (read-only, changes nothing) and shows it
-  next to the logged figure, so you can see how much your logs captured. Needs a
-  fine-grained PAT with billing read; set `tokenCoach.githubOrg` for org-managed
-  (Business/Enterprise) seats.
+- **Local logs only — nothing leaves your machine** — every figure comes
+  straight from the Copilot debug logs on this machine. Those logs are a
+  *partial* record (other machines/workspaces, and ask/inline non-agent modes,
+  aren't written here), so the total normally reads lower than your account-wide
+  meter. Token Coach makes **no network calls** and reads no account/billing data
+  — for your real monthly total, see Copilot's own credit meter on github.com.
 
 ## 1. Enable Copilot debug logging
 
@@ -202,9 +200,6 @@ code --install-extension token-coach-0.5.0.vsix
 | `tokenCoach.notifyOnInefficiency` | `true` | Gentle, throttled nudge (≤1 / 5 min) on a new message's actionable inefficiency (cache cold mid-chat, heavy attachments). |
 | `tokenCoach.pollIntervalSeconds` | `20` | Backup poll interval; `0` disables polling. |
 | `tokenCoach.workspaceStoragePathOverride` | `""` | Optional explicit `workspaceStorage` path (testing / non-standard installs). |
-| `tokenCoach.githubToken` | `""` | Fine-grained PAT with billing read access, for *Check GitHub credit usage* (read-only). Used only on demand; empty ⇒ you're prompted. |
-| `tokenCoach.githubUsername` | `""` | Optional GitHub username for the billing lookup; empty ⇒ derived from the token. |
-| `tokenCoach.githubOrg` | `""` | Org login to read billing from for **org-managed** Copilot seats (per-user endpoints can't see org usage). Empty ⇒ personal billing. |
 
 ## Cost in dollars (credits)
 
@@ -238,10 +233,10 @@ GitHub's meter:
 This gap can't be fixed by reading the logs differently — the missing usage simply
 isn't on disk. (Tell-tale sign: the gap is a *different* ratio on each machine —
 e.g. `1.64×` on one, `1.99×` on another — so it's missing data, not a constant
-conversion error.) To see your **real** monthly total, run **Token Coach: Check
-GitHub credit usage** — it reads the authoritative figure from GitHub's billing API
-(read-only) and shows it next to what the logs captured. It can't read org-managed
-(Business/Enterprise) usage from a personal token — set `tokenCoach.githubOrg` for that.
+conversion error.) Token Coach deliberately makes **no network calls** and reads
+nothing from your GitHub account — it only ever reports what's in the local logs.
+To see your **real** account-wide monthly total, use Copilot's own credit meter
+(the Copilot status menu on github.com).
 
 Sources: [GitHub Copilot is moving to usage-based billing](https://github.blog/news-insights/company-news/github-copilot-is-moving-to-usage-based-billing/) ·
 [Models and pricing for GitHub Copilot](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing) ·
@@ -273,8 +268,7 @@ token-coach/
 │   ├── coach.ts         # rules engine
 │   ├── efficiency.ts    # A–F efficiency grade (all-time + per-chat)
 │   ├── dashboard.ts     # webview HTML + update logic
-│   ├── report.ts        # Markdown export + daily-trend snapshot type
-│   └── githubBilling.ts # GitHub enhanced-billing usage API (read-only credit check)
+│   └── report.ts        # Markdown export + daily-trend snapshot type
 └── README.md
 ```
 

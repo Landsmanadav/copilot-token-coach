@@ -119,6 +119,12 @@ export interface ParsedData {
   titles: Record<string, string>;
   /** Union of tool names *defined* (offered to the model) across all parsed logs. */
   definedTools?: string[];
+  /**
+   * Tool names *defined* (offered to the model) per chat session. Keyed by
+   * sessionId. Lets us judge, per chat, whether a tool was available but never
+   * called — the basis for the "unused across N chats" trend.
+   */
+  definedToolsBySession?: Record<string, string[]>;
   /** Representative per-request tool-definition size in characters (the largest seen). */
   toolDefsChars?: number;
 }
@@ -886,11 +892,13 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
   }
 
   const title = await readChatTitle(sessionDir);
+  const definedList = [...definedTools];
   return {
     requests,
     toolCalls,
     titles: title ? { [file.sessionId]: title } : {},
-    definedTools: [...definedTools],
+    definedTools: definedList,
+    definedToolsBySession: definedList.length ? { [file.sessionId]: definedList } : {},
     toolDefsChars: maxToolDefsChars,
   };
 }
@@ -1051,6 +1059,7 @@ export async function loadAll(overridePath = '', derivedBase = ''): Promise<Pars
   const seenReqIds = new Set<string>();
   const seenToolIds = new Set<string>();
   const definedTools = new Set<string>();
+  const definedToolsBySession: Record<string, string[]> = {};
   let toolDefsChars = 0;
   for (const chunk of parsed) {
     for (const r of chunk.requests) {
@@ -1071,13 +1080,29 @@ export async function loadAll(overridePath = '', derivedBase = ''): Promise<Pars
     for (const name of chunk.definedTools ?? []) {
       definedTools.add(name);
     }
+    // Merge per-session defined tools. A session maps to one file, but union
+    // defensively in case the same sessionId is ever reached twice.
+    for (const [sid, names] of Object.entries(chunk.definedToolsBySession ?? {})) {
+      const merged = new Set(definedToolsBySession[sid] ?? []);
+      for (const n of names) {
+        merged.add(n);
+      }
+      definedToolsBySession[sid] = [...merged];
+    }
     if (chunk.toolDefsChars && chunk.toolDefsChars > toolDefsChars) {
       toolDefsChars = chunk.toolDefsChars;
     }
   }
 
   requests.sort((a, b) => b.timestamp - a.timestamp);
-  return { requests, toolCalls, titles, definedTools: [...definedTools], toolDefsChars };
+  return {
+    requests,
+    toolCalls,
+    titles,
+    definedTools: [...definedTools],
+    definedToolsBySession,
+    toolDefsChars,
+  };
 }
 
 /**
@@ -1098,6 +1123,110 @@ export function analyzeToolInventory(data: ParsedData): ToolInventory {
     unused,
     perRequestChars: data.toolDefsChars ?? 0,
     hasData: defined.size > 0,
+  };
+}
+
+/** One tool's standing in the "unused across chats" trend. */
+export interface UnusedToolTrend {
+  name: string;
+  /**
+   * Net unused score: +1 for each chat the tool was offered but never called,
+   * −1 (floored at 0) for each chat it was called in. Reaching the threshold
+   * flags it; a later chat that uses it pulls the score back down and can drop
+   * it off the list. Higher = unused in more chats than it was used.
+   */
+  score: number;
+  /** Distinct chats the tool was offered in (the observation window for it). */
+  chatsDefinedIn: number;
+  /** Distinct chats it was actually called in. */
+  chatsUsedIn: number;
+}
+
+/** Result of the unused-tool trend analysis. */
+export interface UnusedToolReport {
+  /** Tools whose net score met the threshold, worst (highest score) first. */
+  candidates: UnusedToolTrend[];
+  /** Distinct chats observed in the data (context for the UI). */
+  chatsObserved: number;
+  /** The threshold that was applied. */
+  threshold: number;
+  /** False when there aren't enough chats / no tool catalog to judge. */
+  hasData: boolean;
+}
+
+/**
+ * Decide which tools are "consistently unused" across chats, using a net
+ * counter (the model the user picked): walk chats oldest→newest, and for every
+ * tool that was *offered* in a chat, add 1 if it wasn't called there and
+ * subtract 1 (never below 0) if it was. A tool whose net score reaches
+ * `threshold` is a candidate to disable; if it's used again later the score
+ * falls and it drops off the list — so the advice self-corrects.
+ *
+ * Only counts chats where the tool was actually offered, so a tool isn't
+ * penalised for chats that never had it available. Honest framing matters here:
+ * this is "unused in the logged chats", not "safe to delete" — the UI says so.
+ */
+export function analyzeUnusedToolTrend(data: ParsedData, threshold: number): UnusedToolReport {
+  const definedBySession = data.definedToolsBySession ?? {};
+  const sessionIds = Object.keys(definedBySession);
+
+  // Which tools were actually called in each session.
+  const calledBySession = new Map<string, Set<string>>();
+  for (const tc of data.toolCalls) {
+    let set = calledBySession.get(tc.sessionId);
+    if (!set) {
+      set = new Set<string>();
+      calledBySession.set(tc.sessionId, set);
+    }
+    set.add(tc.name);
+  }
+
+  // Order sessions chronologically by their earliest request, so the net
+  // counter walks chats in the order they happened.
+  const sessionStart = new Map<string, number>();
+  for (const r of data.requests) {
+    const cur = sessionStart.get(r.sessionId);
+    if (cur === undefined || r.timestamp < cur) {
+      sessionStart.set(r.sessionId, r.timestamp);
+    }
+  }
+  const ordered = [...sessionIds].sort(
+    (a, b) => (sessionStart.get(a) ?? 0) - (sessionStart.get(b) ?? 0)
+  );
+
+  const score = new Map<string, number>();
+  const definedIn = new Map<string, number>();
+  const usedIn = new Map<string, number>();
+
+  for (const sid of ordered) {
+    const called = calledBySession.get(sid) ?? new Set<string>();
+    for (const name of definedBySession[sid] ?? []) {
+      definedIn.set(name, (definedIn.get(name) ?? 0) + 1);
+      const prev = score.get(name) ?? 0;
+      if (called.has(name)) {
+        usedIn.set(name, (usedIn.get(name) ?? 0) + 1);
+        score.set(name, Math.max(0, prev - 1));
+      } else {
+        score.set(name, prev + 1);
+      }
+    }
+  }
+
+  const candidates: UnusedToolTrend[] = [...score.entries()]
+    .filter(([, s]) => s >= threshold)
+    .map(([name, s]) => ({
+      name,
+      score: s,
+      chatsDefinedIn: definedIn.get(name) ?? 0,
+      chatsUsedIn: usedIn.get(name) ?? 0,
+    }))
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+  return {
+    candidates,
+    chatsObserved: ordered.length,
+    threshold,
+    hasData: ordered.length > 0 && sessionIds.length > 0,
   };
 }
 

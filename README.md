@@ -100,6 +100,14 @@ Higher-level views layered on top of the raw cost data:
 - **Tool overhead (structural waste)** — parses the tool catalog Copilot ships on
   every request and lists tools **defined but never called** — dead weight in your
   cached prefix, the Copilot analog of "skills you installed but never invoke".
+- **"Tools you might not need" banner** — a top-of-dashboard call-out for tools
+  that stay unused *across chats*, so you can consider disabling the MCP server or
+  tool set they come from. It uses a **net counter** (`+1` for each chat a tool was
+  offered but never called, `−1` for each chat it *was* used, floored at `0`) and
+  flags a tool once it reaches `tokenCoach.unusedToolMinChats` (default `3`). Use
+  the tool again and its score falls until it drops off the list — so the advice
+  self-corrects. Framed honestly as "unused in your logged chats", not "safe to
+  delete".
 - **Idle cache-expiry detection** — flags when a mid-chat message arrived after a
   pause longer than the prompt-cache TTL (~5 min) *and* its cache reuse actually
   dropped — i.e. the cache went cold from time alone, re-billing the whole context
@@ -183,6 +191,10 @@ code --install-extension token-coach-0.5.0.vsix
 
 ## Settings
 
+Every threshold below is a regular VS Code setting — edit it in the Settings UI
+(run **“Token Coach: Open Settings”** from the Command Palette to jump straight to
+them), or in your `settings.json`. Nothing is hard-coded.
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `tokenCoach.costWarnThreshold` | `3000000000` | Flag cost (NanoAiu) above this (= 3 AIU). |
@@ -193,6 +205,7 @@ code --install-extension token-coach-0.5.0.vsix
 | `tokenCoach.ioMinInputTokens` | `10000` | Minimum input before the tiny-output rule fires, so small side-calls aren't mislabelled "huge input". |
 | `tokenCoach.attachmentShareWarn` | `0.4` | Flag a message when open/attached files exceed this share of its logged context. |
 | `tokenCoach.slowToolWarnMs` | `10000` | Flag a message when one tool consumes more than this many ms (summed across calls). |
+| `tokenCoach.unusedToolMinChats` | `3` | Net "unused across chats" score a tool must reach before the dashboard flags it as a candidate to disable (`+1` per chat offered-but-unused, `−1` per chat used, floored at `0`). |
 | `tokenCoach.cacheIdleMinutes` | `5` | Idle minutes after which the prompt cache is assumed expired (Claude TTL ~5 min, OpenAI ~5–10 min). A mid-chat message after a longer pause whose cache reuse also dropped is flagged `cache-expired-idle`. `0` disables. |
 | `tokenCoach.usdPerAiu` | `0.01` | US dollars per 1 AIU (1 AI credit = $0.01, 1 AIU ≈ 1 credit). Set `0` to hide dollar figures. |
 | `tokenCoach.planMonthlyUsd` | `19` | Your monthly plan price (Business = $19, Enterprise/Pro+ = $39). Only tints the status bar when spend gets large — no quota is shown. |

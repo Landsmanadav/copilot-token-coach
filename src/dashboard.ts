@@ -29,8 +29,10 @@ import {
   ContextSource,
   ParsedData,
   ToolInventory,
+  UnusedToolReport,
   groupByChat,
   analyzeToolInventory,
+  analyzeUnusedToolTrend,
 } from './logParser';
 import {
   analyzeRecord,
@@ -991,6 +993,45 @@ function renderToolCard(inv: ToolInventory): string {
 }
 
 /** Collapsible list of defined-but-never-called tools (the "skills you never invoke" view). */
+/**
+ * Top-of-dashboard banner: tools that have gone unused across enough chats to be
+ * worth disabling, per the net-counter trend (see analyzeUnusedToolTrend). Kept
+ * deliberately honest — "unused in your logged chats", not "safe to delete" —
+ * and self-correcting: using a tool again drops it off this list.
+ */
+function renderUnusedToolTrend(report: UnusedToolReport): string {
+  if (!report.hasData || report.candidates.length === 0) {
+    return '';
+  }
+  const n = report.candidates.length;
+  const items = report.candidates
+    .map((c) => {
+      const tip =
+        `Offered in ${c.chatsDefinedIn} chat${c.chatsDefinedIn === 1 ? '' : 's'}, ` +
+        `called in ${c.chatsUsedIn} — net unused score ${c.score} (threshold ${report.threshold}). ` +
+        `Use it again and this score falls until it drops off the list.`;
+      return (
+        `<li><code>${escapeHtml(c.name)}</code>` +
+        `<span class="muted small"> · unused score ${c.score}</span>` +
+        ` <span class="tip info" data-tip="${escapeHtml(tip)}">ⓘ</span></li>`
+      );
+    })
+    .join('');
+  return `
+    <div class="unused-trend card-flag">
+      <div class="unused-trend-head">
+        🧹 <b>${n} tool${n === 1 ? '' : 's'} you might not need</b>
+        <span class="muted small">— offered to the model every request, but consistently unused across your chats</span>
+      </div>
+      <ul class="unused-trend-list">${items}</ul>
+      <p class="muted small unused-trend-note">
+        Every defined tool rides along in the cached prefix and costs cache-read tokens on each request.
+        If one of these comes from an MCP server or tool set you don't use, disabling it shrinks every request from here on.
+        This is based only on your logged chats this month — if you do use one again, it drops off this list automatically.
+      </p>
+    </div>`;
+}
+
 function renderToolInventory(inv: ToolInventory): string {
   if (!inv.hasData || inv.unused.length === 0) {
     return '';
@@ -1073,6 +1114,7 @@ function renderHtml(
   const summary = buildSummary(chats, config);
   const efficiency = computeEfficiencyFromChats(chats, config);
   const inventory = analyzeToolInventory(data);
+  const unusedTrend = analyzeUnusedToolTrend(data, config.unusedToolMinChats);
 
   const MAX_CHATS = 100;
   const shown = chats.slice(0, MAX_CHATS);
@@ -1081,6 +1123,7 @@ function renderHtml(
     chats.length === 0
       ? renderEmptyState()
       : `
+        ${renderUnusedToolTrend(unusedTrend)}
         ${renderCoverage(summary)}
         ${renderSummary(summary, efficiency, inventory, config)}
         ${renderHistory(history)}
@@ -1180,6 +1223,25 @@ function renderHtml(
     .grade-badge.grade-good { color: var(--vscode-charts-green, #4ec9b0); border-color: color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 50%, transparent); }
     .grade-badge.grade-mid { color: var(--vscode-charts-yellow, #d7ba7d); border-color: color-mix(in srgb, var(--vscode-charts-yellow, #d7ba7d) 50%, transparent); }
     .grade-badge.grade-bad { color: var(--vscode-editorError-foreground); border-color: color-mix(in srgb, var(--vscode-editorError-foreground) 50%, transparent); }
+
+    /* Unused-tool trend banner (top of dashboard) */
+    .unused-trend {
+      border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
+      border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 10%, transparent);
+    }
+    .unused-trend-head { font-size: 1.02em; }
+    .unused-trend-list {
+      list-style: none; margin: 10px 0 6px; padding: 0;
+      display: flex; flex-wrap: wrap; gap: 6px 10px;
+    }
+    .unused-trend-list li {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.08));
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+      border-radius: 6px; padding: 3px 9px;
+    }
+    .unused-trend-note { margin: 6px 0 0; line-height: 1.5; }
 
     /* Tool inventory (structural waste) */
     .tools-inv {

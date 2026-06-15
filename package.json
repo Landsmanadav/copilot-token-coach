@@ -2,7 +2,7 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "publisher": "NadavLAN",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -57,6 +57,11 @@
         "command": "tokenCoach.exportReport",
         "title": "Token Coach: Export Report (Markdown)",
         "icon": "$(save)"
+      },
+      {
+        "command": "tokenCoach.openSettings",
+        "title": "Token Coach: Open Settings",
+        "icon": "$(gear)"
       }
     ],
     "configuration": {
@@ -111,6 +116,12 @@
           "default": 5,
           "minimum": 0,
           "markdownDescription": "Idle minutes after which the prompt cache is assumed to have expired. If a mid-chat message arrives after a longer pause **and** its cache reuse actually dropped, it's flagged as `cache-expired-idle`. The Claude (Anthropic) cache TTL is ~5 min (sliding); OpenAI's is ~5–10 min. Set `0` to disable idle detection."
+        },
+        "tokenCoach.unusedToolMinChats": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "markdownDescription": "How consistently a tool must go unused before the dashboard flags it as a candidate to disable. Uses a **net counter**: +1 for each chat the tool was offered but never called, −1 (floored at `0`) for each chat it *was* called in. Once the score reaches this value the tool is listed at the top of the dashboard; if you use it again later the score falls and it drops off the list. Default `3`."
         },
         "tokenCoach.usdPerAiu": {
           "type": "number",

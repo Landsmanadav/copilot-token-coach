@@ -50,6 +50,13 @@ export interface CoachConfig {
    * Claude (Anthropic) cache TTL is ~5 min (sliding); OpenAI's is ~5–10 min.
    */
   cacheIdleMinutes: number;
+  /**
+   * Net "unused across chats" score a tool must reach before the dashboard
+   * flags it as a candidate to disable. +1 per chat it was offered but never
+   * called, −1 (floored at 0) per chat it was used. A higher value waits for
+   * more evidence before nudging.
+   */
+  unusedToolMinChats: number;
 }
 
 /** Sensible defaults, mirroring the values declared in package.json. */
@@ -65,6 +72,7 @@ export const DEFAULT_COACH_CONFIG: CoachConfig = {
   usdPerAiu: 0.01,
   planMonthlyUsd: 19,
   cacheIdleMinutes: 5,
+  unusedToolMinChats: 3,
 };
 
 /** Rough chars→tokens estimate. Context payload sizes are measured in chars. */

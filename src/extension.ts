@@ -84,6 +84,7 @@ function getCoachConfig(): CoachConfig {
     usdPerAiu: cfg.get('usdPerAiu', DEFAULT_COACH_CONFIG.usdPerAiu),
     planMonthlyUsd: cfg.get('planMonthlyUsd', DEFAULT_COACH_CONFIG.planMonthlyUsd),
     cacheIdleMinutes: cfg.get('cacheIdleMinutes', DEFAULT_COACH_CONFIG.cacheIdleMinutes),
+    unusedToolMinChats: cfg.get('unusedToolMinChats', DEFAULT_COACH_CONFIG.unusedToolMinChats),
   };
 }
 
@@ -596,7 +597,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('tokenCoach.showDashboard', () => void showDashboard()),
     vscode.commands.registerCommand('tokenCoach.refresh', () => void refresh()),
-    vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport())
+    vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport()),
+    // Open VS Code's Settings UI pre-filtered to this extension's settings.
+    vscode.commands.registerCommand('tokenCoach.openSettings', () =>
+      void vscode.commands.executeCommand('workbench.action.openSettings', `@ext:${context.extension.id}`)
+    )
   );
 
   // React to relevant settings changes: re-read thresholds, restart watchers /

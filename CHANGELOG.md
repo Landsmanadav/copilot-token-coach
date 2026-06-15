@@ -4,6 +4,20 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-16
+
+### Added
+- **"Tools you might not need" banner** at the top of the dashboard. Flags tools
+  that are offered to the model on every request but go consistently unused
+  across your chats, using a **net counter**: +1 for each chat a tool was offered
+  but never called, −1 (floored at 0) for each chat it *was* called in. A tool is
+  listed once its score reaches `tokenCoach.unusedToolMinChats` (default `3`), and
+  it drops off automatically the moment you use it again — so the advice
+  self-corrects. Framed honestly as "unused in your logged chats," not "safe to
+  delete." New configurable setting `tokenCoach.unusedToolMinChats`.
+- **`Token Coach: Open Settings` command** — opens the Settings UI pre-filtered to
+  Token Coach's settings, so every tunable threshold is one command away.
+
 ## [1.0.1] - 2026-06-15
 
 ### Removed
@@ -76,6 +90,7 @@ First stable release, published to the VS Code Marketplace.
 - Initial packaged release: log parser, coaching rules, dashboard webview, status
   bar, Markdown export, and optional GitHub credit-usage lookup.
 
+[1.1.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.1.0
 [1.0.1]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.0
 [0.5.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v0.5.0

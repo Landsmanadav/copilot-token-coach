@@ -12,8 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=NadavLAN.token-coach"><img alt="VS Marketplace Version" src="https://img.shields.io/visual-studio-marketplace/v/NadavLAN.token-coach?label=Marketplace"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=NadavLAN.token-coach"><img alt="VS Marketplace Installs" src="https://img.shields.io/visual-studio-marketplace/i/NadavLAN.token-coach"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=NadavLAN.token-coach"><img alt="Install on VS Marketplace" src="https://img.shields.io/badge/VS%20Marketplace-Install-blue?logo=visualstudiocode"></a>
 </p>
 
 ![Token Coach dashboard — summary cards, per-model spend, and per-chat cost breakdown](images/dashboard.png)

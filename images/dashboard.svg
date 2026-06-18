@@ -20,7 +20,7 @@
   <!-- header -->
   <text x="32" y="52" class="txt" font-size="26" font-weight="700">📊 Token Coach</text>
   <rect x="232" y="32" width="58" height="26" rx="13" fill="#2D2D30"/>
-  <text x="261" y="50" class="mono mut" font-size="13" text-anchor="middle">v0.5.0</text>
+  <text x="261" y="50" class="mono mut" font-size="13" text-anchor="middle">v1.1.1</text>
   <rect x="980" y="30" width="92" height="30" rx="4" fill="#0E639C"/>
   <text x="1026" y="50" fill="#FFFFFF" font-size="13" text-anchor="middle">↻ Refresh</text>
   <rect x="1084" y="30" width="84" height="30" rx="4" fill="#3A3D41"/>

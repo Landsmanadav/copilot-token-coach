@@ -2,7 +2,7 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "NadavLAN",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -127,6 +127,24 @@
           "type": "number",
           "default": 0.01,
           "markdownDescription": "US dollars per 1 AIU. GitHub's June 2026 usage-based billing prices **1 AI credit = $0.01**, and 1 AIU ≈ 1 AI credit, so the default is `0.01`. Set to `0` to hide dollar estimates."
+        },
+        "tokenCoach.costInputWeight": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "markdownDescription": "Relative price weight for **fresh (uncached) input** tokens. Used only to split each request's real, logged AIU across input / cached-input / output for the breakdown — the log stores a single total per request, so the per-bucket split is an **estimate** while the total stays exact. This is the baseline (`1`)."
+        },
+        "tokenCoach.costCachedInputWeight": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "markdownDescription": "Relative price weight for **cached input** tokens, used for the AIU breakdown split (see `#tokenCoach.costInputWeight#`). Cached reads are billed far cheaper, so the default is `0.1` (~10% of fresh input)."
+        },
+        "tokenCoach.costOutputWeight": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "markdownDescription": "Relative price weight for **output** tokens, used for the AIU breakdown split (see `#tokenCoach.costInputWeight#`). Output is typically the most expensive, so the default is `4` (~4× fresh input)."
         },
         "tokenCoach.planMonthlyUsd": {
           "type": "number",

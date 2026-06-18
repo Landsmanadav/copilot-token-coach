@@ -43,6 +43,16 @@ export interface CoachConfig {
   slowToolWarnMs: number;
   /** US dollars per 1 AIU (GitHub: 1 AI credit = $0.01, 1 AIU ≈ 1 credit). 0 hides $. */
   usdPerAiu: number;
+  /**
+   * Relative price weights used ONLY to distribute each request's real, logged
+   * AIU cost across fresh input / cached input / output. The log records a single
+   * total per request (no per-component cost), so the per-bucket split is an
+   * estimate; the total always stays exactly as logged. Defaults mirror typical
+   * LLM economics: cached reads ~10% of fresh input, output ~4× fresh input.
+   */
+  costInputWeight: number;
+  costCachedInputWeight: number;
+  costOutputWeight: number;
   /** Monthly plan price per user (Copilot Business = $19). Kept for status-bar tinting. */
   planMonthlyUsd: number;
   /**
@@ -70,6 +80,9 @@ export const DEFAULT_COACH_CONFIG: CoachConfig = {
   attachmentShareWarn: 0.4,
   slowToolWarnMs: 10_000,
   usdPerAiu: 0.01,
+  costInputWeight: 1,
+  costCachedInputWeight: 0.1,
+  costOutputWeight: 4,
   planMonthlyUsd: 19,
   cacheIdleMinutes: 5,
   unusedToolMinChats: 3,

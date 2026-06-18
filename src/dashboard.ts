@@ -155,11 +155,50 @@ function groupWarnings(group: MessageGroup, config: CoachConfig): CoachWarning[]
 // Summary
 // ---------------------------------------------------------------------------
 
+/** AIU cost attributed to each token bucket (an estimate — see splitCost). */
+interface CostSplit {
+  input: number;
+  cached: number;
+  output: number;
+}
+
+/**
+ * Distribute a request's real, logged AIU cost across fresh-input / cached-input
+ * / output. The Copilot log stores only a single total per request (no
+ * per-component cost), so this split is an ESTIMATE driven by the configurable
+ * price weights. The three parts always sum back to `costNanoAiu`, so the total
+ * stays exactly as logged — only the distribution is modelled.
+ */
+function splitCost(
+  costNanoAiu: number,
+  freshInput: number,
+  cachedInput: number,
+  output: number,
+  config: CoachConfig
+): CostSplit {
+  const wIn = Math.max(0, freshInput) * config.costInputWeight;
+  const wCached = Math.max(0, cachedInput) * config.costCachedInputWeight;
+  const wOut = Math.max(0, output) * config.costOutputWeight;
+  const w = wIn + wCached + wOut;
+  if (w <= 0 || costNanoAiu <= 0) {
+    return { input: 0, cached: 0, output: 0 };
+  }
+  return {
+    input: (costNanoAiu * wIn) / w,
+    cached: (costNanoAiu * wCached) / w,
+    output: (costNanoAiu * wOut) / w,
+  };
+}
+
 interface Summary {
   totalCostNanoAiu: number;
   todayCostNanoAiu: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** Cached input tokens (a subset of totalInputTokens). */
+  totalCachedTokens: number;
+  /** Estimated AIU split across fresh-input / cached-input / output (sums to total). */
+  costSplit: CostSplit;
   totalRequests: number;
   chatCount: number;
   messageCount: number;
@@ -184,6 +223,7 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
   let messageCount = 0;
   let flagged = 0;
   let priciest: MessageGroup | undefined;
+  const costSplit: CostSplit = { input: 0, cached: 0, output: 0 };
 
   // Track the span of logged data (first → last request) plus the distinct
   // calendar days that actually have logs, so the dashboard can state which
@@ -211,6 +251,16 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
         flagged++;
       }
       for (const r of g.requests) {
+        const part = splitCost(
+          r.costNanoAiu,
+          r.inputTokens - r.cachedTokens,
+          r.cachedTokens,
+          r.outputTokens,
+          config
+        );
+        costSplit.input += part.input;
+        costSplit.cached += part.cached;
+        costSplit.output += part.output;
         if (r.timestamp <= 0) {
           continue;
         }
@@ -234,6 +284,8 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
     todayCostNanoAiu: todayCost,
     totalInputTokens: totalInput,
     totalOutputTokens: totalOutput,
+    totalCachedTokens: totalCached,
+    costSplit,
     totalRequests,
     chatCount: chats.length,
     messageCount,
@@ -601,6 +653,27 @@ function renderTimeline(group: MessageGroup, config: CoachConfig): string {
 
 // ---- Message group -------------------------------------------------------
 
+/**
+ * A compact "input vs output" token-share chip for message/chat headers. Input
+ * is the whole prompt (cached included); a high input share with little output
+ * is the classic "shovel in context, get little produced" signal. Returns '' when
+ * there are no tokens. `className` lets the caller match the surrounding style
+ * (e.g. "chip" in message meta, plain in chat meta).
+ */
+function renderIoChip(inputTokens: number, outputTokens: number, className: string): string {
+  const total = inputTokens + outputTokens;
+  if (total <= 0) {
+    return '';
+  }
+  const inPct = Math.round((inputTokens / total) * 100);
+  const tip =
+    `Input vs output tokens: ${formatTokens(inputTokens)} in · ${formatTokens(outputTokens)} out. ` +
+    `A high input share with little output usually means lots of context was sent for little produced work.`;
+  return `<span class="${className} tip tip-left" data-tip="${escapeHtml(
+    tip
+  )}">in ${inPct}% · out ${100 - inPct}%</span>`;
+}
+
 function renderGroup(group: MessageGroup, config: CoachConfig, isOpen: boolean): string {
   const warnings = groupWarnings(group, config);
   const level = highestLevel(warnings);
@@ -642,6 +715,7 @@ function renderGroup(group: MessageGroup, config: CoachConfig, isOpen: boolean):
           <span class="msg-meta">
             <span class="chip">${reqLabel}</span>
             ${gapChip}
+            ${renderIoChip(group.totalInputTokens, group.totalOutputTokens, 'chip')}
             <span class="chip tip tip-left" data-tip="${escapeHtml(
               `Aggregate over this message's ${group.requests.length} request${group.requests.length === 1 ? '' : 's'}: ` +
                 `${formatTokens(group.totalCachedTokens)} of ${formatTokens(group.totalInputTokens)} input tokens served from cache. ` +
@@ -699,6 +773,7 @@ function renderChat(chat: ChatGroup, config: CoachConfig, openState: Map<string,
         </div>
         <div class="chat-meta muted">
           <span>${escapeHtml(meta)}</span>
+          ${renderIoChip(chat.totalInputTokens, chat.totalOutputTokens, 'io-split')}
           <span class="tip" data-tip="${escapeHtml(
             `Aggregate over the whole chat: ${formatTokens(chat.totalCachedTokens)} of ${formatTokens(chat.totalInputTokens)} input tokens served from cache (billed at the cheaper cached rate).`
           )}">cache ${escapeHtml(formatPercent(chat.cacheHitRate))}</span>
@@ -891,6 +966,40 @@ function renderEfficiencyCard(eff: EfficiencyScore): string {
     </div>`;
 }
 
+/**
+ * "Token mix" card: how tokens split across fresh input / cached input / output,
+ * plus the headline input-vs-output share. Input here is everything sent to the
+ * model; `cached` is the subset of input served from the prompt cache (billed
+ * far cheaper). A high input share with little output is the classic
+ * "shovel in context, get little produced" signal.
+ */
+function renderTokenMixCard(summary: Summary): string {
+  const input = summary.totalInputTokens;
+  const output = summary.totalOutputTokens;
+  const total = input + output;
+  if (total <= 0) {
+    return '';
+  }
+  const cached = Math.min(Math.max(0, summary.totalCachedTokens), input);
+  const fresh = Math.max(0, input - cached);
+  const inputPct = Math.round((input / total) * 100);
+  const outputPct = 100 - inputPct;
+  const help =
+    `How your tokens split. Input = everything sent to the model (context, history, ` +
+    `tool catalog); Output = what it generated. Of the input, the cached part is billed ` +
+    `~80% cheaper. A high input share with very little output usually means lots of ` +
+    `context was shovelled in for little produced work. Totals: ${formatTokens(fresh)} ` +
+    `fresh input + ${formatTokens(cached)} cached input · ${formatTokens(output)} output.`;
+  return `
+    <div class="card">
+      <div class="card-label">Token mix <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
+      <div class="card-value">${inputPct}% <span class="muted score-of">in</span> · ${outputPct}% <span class="muted score-of">out</span></div>
+      <div class="card-sub muted">in: ${escapeHtml(formatTokensCompact(fresh))} fresh + ${escapeHtml(
+        formatTokensCompact(cached)
+      )} cached · out: ${escapeHtml(formatTokensCompact(output))}</div>
+    </div>`;
+}
+
 /** Compact daily trend of the efficiency grade (the "saved history" view). */
 function renderHistory(history: DailySnapshot[]): string {
   if (history.length < 2) {
@@ -915,25 +1024,107 @@ interface ModelSpend {
   model: string;
   requests: number;
   tokens: number;
+  /** Total input tokens (includes the cached subset). */
+  inputTokens: number;
+  /** Cached input tokens (a subset of inputTokens, billed cheaper). */
+  cachedTokens: number;
+  outputTokens: number;
   cost: number;
+  /** Estimated AIU split across fresh-input / cached-input / output (sums to cost). */
+  costSplit: CostSplit;
 }
 
 /** Aggregate cost / tokens / requests per model, priciest first. */
-function buildModelSpend(data: ParsedData): ModelSpend[] {
+function buildModelSpend(data: ParsedData, config: CoachConfig): ModelSpend[] {
   const byModel = new Map<string, ModelSpend>();
   for (const r of data.requests) {
-    const e = byModel.get(r.model) ?? { model: r.model, requests: 0, tokens: 0, cost: 0 };
+    const e =
+      byModel.get(r.model) ??
+      {
+        model: r.model,
+        requests: 0,
+        tokens: 0,
+        inputTokens: 0,
+        cachedTokens: 0,
+        outputTokens: 0,
+        cost: 0,
+        costSplit: { input: 0, cached: 0, output: 0 },
+      };
     e.requests += 1;
     e.tokens += r.inputTokens + r.outputTokens;
+    e.inputTokens += r.inputTokens;
+    e.cachedTokens += r.cachedTokens;
+    e.outputTokens += r.outputTokens;
     e.cost += r.costNanoAiu;
+    const part = splitCost(r.costNanoAiu, r.inputTokens - r.cachedTokens, r.cachedTokens, r.outputTokens, config);
+    e.costSplit.input += part.input;
+    e.costSplit.cached += part.cached;
+    e.costSplit.output += part.output;
     byModel.set(r.model, e);
   }
   return [...byModel.values()].sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
 }
 
+/**
+ * "Token & cost breakdown" — the three token buckets (fresh input / cached input
+ * / output) with token counts, token share, and estimated AIU. Token counts come
+ * straight from the logs; the per-bucket AIU is modelled from the token mix (see
+ * splitCost) while the total stays exactly as logged. Also surfaces the headline
+ * input-vs-output token share — a high input share with little output is the
+ * classic "shovel in context, get little produced" signal.
+ */
+function renderTokenBreakdown(summary: Summary, config: CoachConfig): string {
+  const input = summary.totalInputTokens;
+  const output = summary.totalOutputTokens;
+  const tokenTotal = input + output;
+  if (tokenTotal <= 0) {
+    return '';
+  }
+  const cached = Math.min(Math.max(0, summary.totalCachedTokens), input);
+  const fresh = Math.max(0, input - cached);
+  const inputPct = Math.round((input / tokenTotal) * 100);
+  const usd = (nano: number) =>
+    config.usdPerAiu > 0
+      ? ` <span class="muted">(${escapeHtml(formatUsd(nano, config.usdPerAiu))})</span>`
+      : '';
+  const buckets = [
+    { label: 'Fresh input', tag: '<span class="tag-billed">full price</span>', tokens: fresh, aiu: summary.costSplit.input },
+    { label: 'Cached input', tag: '<span class="tag-included">~80% cheaper</span>', tokens: cached, aiu: summary.costSplit.cached },
+    { label: 'Output', tag: '', tokens: output, aiu: summary.costSplit.output },
+  ];
+  const body = buckets
+    .map((b) => {
+      const share = Math.round((b.tokens / tokenTotal) * 100);
+      return `
+        <tr>
+          <td>${b.label} ${b.tag}</td>
+          <td class="num">${escapeHtml(formatTokensCompact(b.tokens))}</td>
+          <td class="num">${share}%</td>
+          <td class="num">${escapeHtml(formatCost(b.aiu))}${usd(b.aiu)}</td>
+        </tr>`;
+    })
+    .join('');
+  const help =
+    'Tokens come straight from the logs. The per-bucket AIU is an estimate: the log records only one ' +
+    'total cost per request, so Token Coach distributes that real total across the buckets using the ' +
+    'configurable price weights (tokenCoach.costInputWeight / costCachedInputWeight / costOutputWeight). ' +
+    'The total AIU always matches the logs exactly.';
+  return `
+    <details class="model-spend" open>
+      <summary>🔬 Token &amp; cost breakdown
+        <span class="muted small">(input ${inputPct}% / output ${100 - inputPct}% · per-bucket AIU is an estimate <span class="tip info" data-tip="${escapeHtml(
+          help
+        )}">ⓘ</span>)</span></summary>
+      <table class="mini">
+        <thead><tr><th>Bucket</th><th class="num">Tokens</th><th class="num">Token share</th><th class="num">AIU (est.)</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </details>`;
+}
+
 /** "Where your premium budget goes" — per-model spend table, billed vs included. */
 function renderModelSpend(data: ParsedData, config: CoachConfig): string {
-  const rows = buildModelSpend(data);
+  const rows = buildModelSpend(data, config);
   if (rows.length === 0) {
     return '';
   }
@@ -949,11 +1140,29 @@ function renderModelSpend(data: ParsedData, config: CoachConfig): string {
         config.usdPerAiu > 0
           ? ` <span class="muted">(${escapeHtml(formatUsd(r.cost, config.usdPerAiu))})</span>`
           : '';
+      // Token mix: input vs output share, with fresh/cached/output + the
+      // estimated AIU split available on hover.
+      const ioTotal = r.inputTokens + r.outputTokens;
+      const inPct = ioTotal > 0 ? Math.round((r.inputTokens / ioTotal) * 100) : 0;
+      const fresh = Math.max(0, r.inputTokens - r.cachedTokens);
+      const cached = Math.min(Math.max(0, r.cachedTokens), r.inputTokens);
+      const mixTip =
+        ioTotal > 0
+          ? `Tokens — ${formatTokens(fresh)} fresh input · ${formatTokens(cached)} cached input · ` +
+            `${formatTokens(r.outputTokens)} output. Estimated AIU split (distribution modelled from the ` +
+            `token mix; the ${formatCost(r.cost)} total is exact): ${formatCost(r.costSplit.input)} input · ` +
+            `${formatCost(r.costSplit.cached)} cached · ${formatCost(r.costSplit.output)} output.`
+          : 'No token data for this model.';
+      const mixCell =
+        ioTotal > 0
+          ? `<span class="tip tip-left" data-tip="${escapeHtml(mixTip)}">${inPct}/${100 - inPct}%</span>`
+          : '<span class="muted">—</span>';
       return `
         <tr>
           <td><span class="badge">${escapeHtml(r.model)}</span> ${tag}</td>
           <td class="num">${r.requests.toLocaleString()}</td>
           <td class="num">${escapeHtml(formatTokensCompact(r.tokens))}</td>
+          <td class="num">${mixCell}</td>
           <td class="num">${escapeHtml(formatCost(r.cost))}${usd}</td>
           <td class="bar-cell">
             <span class="bar"><span class="bar-fill" style="width:${pct}%"></span></span>
@@ -967,7 +1176,7 @@ function renderModelSpend(data: ParsedData, config: CoachConfig): string {
       <summary>💸 Model spend
         <span class="muted small">(where your premium budget goes — “included” models are free under your plan)</span></summary>
       <table class="mini">
-        <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Cost</th><th>Share of cost</th></tr></thead>
+        <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num tip" data-tip="Input vs output token share. Hover a row for the fresh/cached/output breakdown and the estimated AIU split.">In/Out</th><th class="num">Cost</th><th>Share of cost</th></tr></thead>
         <tbody>${body}</tbody>
       </table>
     </details>`;
@@ -1072,6 +1281,7 @@ function renderSummary(
         <div class="card-value">${escapeHtml(formatPercent(summary.aggregateCacheHitRate))}</div>
         <div class="card-sub muted">cached input is ~80% cheaper</div>
       </div>
+      ${renderTokenMixCard(summary)}
       <div class="card">
         <div class="card-label">Activity</div>
         <div class="card-value">${summary.chatCount.toLocaleString()} <span class="muted score-of">chat${summary.chatCount === 1 ? '' : 's'}</span></div>
@@ -1127,6 +1337,7 @@ function renderHtml(
         ${renderCoverage(summary)}
         ${renderSummary(summary, efficiency, inventory, config)}
         ${renderHistory(history)}
+        ${renderTokenBreakdown(summary, config)}
         ${renderModelSpend(data, config)}
         ${renderToolInventory(inventory)}
         ${

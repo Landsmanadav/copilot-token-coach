@@ -4,6 +4,30 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-18
+
+### Added
+- **"Token & cost breakdown" section** on the dashboard, splitting your usage
+  into three buckets — **fresh input**, **cached input**, and **output** — each
+  with its token count, token share, and estimated AIU. Token counts come
+  straight from the logs; the per-bucket AIU is **modelled** from the token mix,
+  while the total AIU always matches the logs exactly (the Copilot log records
+  only one total cost per request, no per-component cost).
+- **"Token mix" summary card** showing the headline input-vs-output token share —
+  a high input share with little output is the classic "shovel in context, get
+  little produced" signal.
+- **In/Out token-share chips** on each message and chat header, and a new **In/Out
+  column** in the Model spend table (hover a row for the fresh/cached/output
+  split and the estimated per-bucket AIU).
+- Three new configurable price weights used **only** to distribute each request's
+  real, logged AIU across the buckets: `tokenCoach.costInputWeight` (default `1`),
+  `tokenCoach.costCachedInputWeight` (default `0.1`), and
+  `tokenCoach.costOutputWeight` (default `4`). Changing them never changes the
+  exact total — only how the estimated split is drawn.
+
+### Changed
+- README Marketplace badge simplified to a single "Install" badge.
+
 ## [1.1.0] - 2026-06-16
 
 ### Added
@@ -90,6 +114,7 @@ First stable release, published to the VS Code Marketplace.
 - Initial packaged release: log parser, coaching rules, dashboard webview, status
   bar, Markdown export, and optional GitHub credit-usage lookup.
 
+[1.1.1]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.1.0
 [1.0.1]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.0

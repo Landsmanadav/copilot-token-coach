@@ -4,6 +4,51 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-06-19
+
+A big visual release: the dashboard is rebuilt around real charts, a brand-new
+user gets a one-click start, and the settings are reorganized to be readable. The
+underlying logic and numbers are unchanged — same honest, local-only data, shown
+far better.
+
+### Added
+- **Redesigned, chart-driven dashboard**, built on a new **zero-dependency
+  inline-SVG chart kit** (`charts.ts`). No charting library, so it stays inside
+  the webview's strict CSP and themes entirely through VS Code's chart palette
+  (tracks light/dark automatically):
+  - a dense **KPI grid** — *Used this month* with an **interactive daily-spend
+    sparkline**, *Today*, an **Efficiency ring**, a **Cache ring**, and a
+    **token-mix bar**;
+  - **Spend over the month** — daily **stacked columns** split into fresh /
+    cached / output, with the spike days obvious and per-day hover detail;
+  - **Spend by model** — ranked horizontal bars (billed vs included);
+  - a **Token & cost breakdown donut**;
+  - an **interactive Efficiency trend** line chart with a **crosshair + tooltip
+    that follows the mouse**, a fixed 0–100 scale, and A / B–C / D–F grade bands
+    so the height actually means something;
+  - a per-chat relative **cost bar**, so the priciest chats stand out at a glance.
+- **One-click onboarding** — when Copilot debug logging is off, the empty state
+  shows an **⚡ Enable Copilot logging** button that flips the two Copilot
+  settings for you (no copy-pasting setting ids), plus a matching
+  **`Token Coach: Enable Copilot Logging`** command.
+- **⚙ Settings button** in the dashboard toolbar (and the empty state), opening
+  Token Coach's settings.
+
+### Changed
+- **Settings reorganized into three labelled groups** — *Token Coach*
+  (notifications + money), *Token Coach: Warnings* (the flag thresholds), and
+  *Token Coach: Advanced* (cost-split weights + internals) — each with a
+  plain-language description, so a new user isn't faced with a wall of numbers.
+- **BREAKING — `tokenCoach.costWarnThreshold` is now measured in credits**
+  (default `3`) instead of raw NanoAiu (`3000000000`). If you previously
+  customised it, divide your value by 1,000,000,000 (e.g. `3000000000` → `3`).
+  Defaults are unaffected.
+
+### Removed
+- **`tokenCoach.workspaceStoragePathOverride` removed from the Settings UI.**
+  Auto-detection already covers every standard install; the override still works
+  if set directly in `settings.json` for non-standard installs or testing.
+
 ## [1.1.1] - 2026-06-18
 
 ### Added
@@ -114,6 +159,7 @@ First stable release, published to the VS Code Marketplace.
 - Initial packaged release: log parser, coaching rules, dashboard webview, status
   bar, Markdown export, and optional GitHub credit-usage lookup.
 
+[2.0.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v2.0.0
 [1.1.1]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.1.0
 [1.0.1]: https://github.com/Landsmanadav/copilot-token-coach/releases/tag/v1.0.1

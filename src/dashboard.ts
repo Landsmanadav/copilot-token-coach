@@ -45,6 +45,17 @@ import {
 } from './coach';
 import { computeEfficiencyFromChats, computeChatEfficiency, EfficiencyScore } from './efficiency';
 import type { DailySnapshot } from './report';
+import {
+  CHART,
+  SEMANTIC,
+  columns,
+  ring,
+  donut,
+  segmentedBar,
+  rankedBars,
+  lineChart,
+  type ColumnSeries,
+} from './charts';
 
 // ---------------------------------------------------------------------------
 // Formatting helpers (exported so the status bar can reuse them).
@@ -296,6 +307,79 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
     coverageEndTs: coverageEnd,
     coverageActiveDays: activeDays.size,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Daily spend series — drives the "spend over the month" column chart and the
+// "Used" card sparkline. Built straight from the (month-scoped) requests on
+// disk: each request's REAL logged cost, split into fresh / cached / output via
+// the same splitCost() the rest of the dashboard uses (the three parts sum back
+// to the exact logged total). Idle days are filled with zeros so the chart shows
+// the true day-to-day cadence, not a compressed list of active days only.
+// ---------------------------------------------------------------------------
+
+interface DaySpend {
+  /** Local `YYYY-MM-DD`. */
+  dayKey: string;
+  /** Start-of-day timestamp (for sorting + axis labels). */
+  ts: number;
+  fresh: number;
+  cached: number;
+  output: number;
+  /** Exact logged total for the day (== fresh + cached + output, by construction). */
+  total: number;
+}
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+function dayKeyOf(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/**
+ * Bucket the month's requests into per-day spend, split fresh/cached/output.
+ * Fills every calendar day from the 1st of the month through today so idle days
+ * render as gaps (honest cadence), even if logging only started mid-month.
+ */
+function buildDailySpend(data: ParsedData, config: CoachConfig): DaySpend[] {
+  const byDay = new Map<string, DaySpend>();
+  for (const r of data.requests) {
+    if (r.timestamp <= 0) {
+      continue;
+    }
+    const key = dayKeyOf(r.timestamp);
+    const part = splitCost(
+      r.costNanoAiu,
+      r.inputTokens - r.cachedTokens,
+      r.cachedTokens,
+      r.outputTokens,
+      config
+    );
+    const e =
+      byDay.get(key) ??
+      { dayKey: key, ts: startOfDay(r.timestamp), fresh: 0, cached: 0, output: 0, total: 0 };
+    e.fresh += part.input;
+    e.cached += part.cached;
+    e.output += part.output;
+    e.total += r.costNanoAiu;
+    byDay.set(key, e);
+  }
+  if (byDay.size === 0) {
+    return [];
+  }
+  // Fill the month-to-date axis: 1st of the current month → today (local).
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const days: DaySpend[] = [];
+  for (let d = new Date(monthStart); d <= now; d.setDate(d.getDate() + 1)) {
+    const ts = startOfDay(d.getTime());
+    const key = dayKeyOf(ts);
+    days.push(byDay.get(key) ?? { dayKey: key, ts, fresh: 0, cached: 0, output: 0, total: 0 });
+  }
+  return days;
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +824,12 @@ function renderGroup(group: MessageGroup, config: CoachConfig, isOpen: boolean):
 
 // ---- Chat (session) ------------------------------------------------------
 
-function renderChat(chat: ChatGroup, config: CoachConfig, openState: Map<string, boolean>): string {
+function renderChat(
+  chat: ChatGroup,
+  config: CoachConfig,
+  openState: Map<string, boolean>,
+  maxChatCost: number
+): string {
   // Everything starts collapsed; the user expands what they want (and that
   // choice is remembered across refreshes via openState).
   const isOpen = openState.has(chat.sessionId) ? openState.get(chat.sessionId)! : false;
@@ -771,6 +860,13 @@ function renderChat(chat: ChatGroup, config: CoachConfig, openState: Map<string,
           ${usd}
           <span class="chat-tokens muted">${escapeHtml(formatTokensCompact(chat.totalInputTokens + chat.totalOutputTokens))} tok</span>
         </div>
+        <div class="chat-bar tip" data-tip="${escapeHtml(
+          `This chat is ${formatCost(chat.totalCostNanoAiu)}${
+            maxChatCost > 0 ? ` — ${Math.round((chat.totalCostNanoAiu / maxChatCost) * 100)}% of your priciest chat this month` : ''
+          }.`
+        )}"><span class="chat-bar-fill" style="width:${
+          maxChatCost > 0 ? Math.round((chat.totalCostNanoAiu / maxChatCost) * 100) : 0
+        }%"></span></div>
         <div class="chat-meta muted">
           <span>${escapeHtml(meta)}</span>
           ${renderIoChip(chat.totalInputTokens, chat.totalOutputTokens, 'io-split')}
@@ -789,20 +885,45 @@ function renderChat(chat: ChatGroup, config: CoachConfig, openState: Map<string,
     </details>`;
 }
 
-function renderEmptyState(): string {
+/**
+ * Onboarding empty state. Two flavours:
+ *   • logging OFF → a one-click "Enable logging" button (the extension writes the
+ *     two Copilot settings for you) — exactly what a brand-new user needs the
+ *     first time, no copy-pasting setting ids.
+ *   • logging ON but no data yet → "use Copilot, then Refresh".
+ */
+function renderEmptyState(loggingEnabled: boolean): string {
+  if (!loggingEnabled) {
+    return `
+    <div class="empty">
+      <div class="empty-icon">📊</div>
+      <h2>Let’s turn on Copilot’s usage logging</h2>
+      <p>Token Coach reads GitHub Copilot’s local debug logs to show exactly where your credits go — but
+        Copilot doesn’t write those logs until you switch them on. One click does it (it just flips two
+        VS Code settings; nothing leaves your machine):</p>
+      <p class="empty-actions">
+        <button id="enableLogging" class="primary">⚡ Enable Copilot logging</button>
+        <button id="emptySettings" class="ghost">⚙ Settings</button>
+      </p>
+      <p class="muted small">Then use Copilot Chat a few times and the dashboard fills in automatically.
+        Prefer to do it by hand? Set
+        <code>github.copilot.chat.agentDebugLog.enabled</code> and
+        <code>github.copilot.chat.agentDebugLog.fileLogging.enabled</code> to <code>true</code>.</p>
+    </div>`;
+  }
   return `
     <div class="empty">
-      <h2>No Copilot usage logged this month yet</h2>
-      <p>Token Coach shows the current calendar month only — it starts fresh on the 1st, like GitHub's
-        credit meter. If you've never collected data, enable both of these settings in VS Code, then use
-        Copilot Chat a few times:</p>
-      <ul>
-        <li><code>github.copilot.chat.agentDebugLog.enabled</code> → <code>true</code></li>
-        <li><code>github.copilot.chat.agentDebugLog.fileLogging.enabled</code> → <code>true</code></li>
-      </ul>
-      <p>Logs are written to your VS Code <code>workspaceStorage</code> under
-        <code>GitHub.copilot-chat/debug-logs/&lt;session&gt;/main.jsonl</code>.</p>
-      <p><button id="refresh">Refresh</button></p>
+      <div class="empty-icon">✅</div>
+      <h2>Logging is on — no usage logged this month yet</h2>
+      <p>Token Coach shows the current calendar month only — it starts fresh on the 1st, like GitHub’s
+        credit meter. Use Copilot Chat a few times, then refresh to see your spend, cache reuse, and
+        where the tokens go.</p>
+      <p class="empty-actions">
+        <button id="emptyRefresh" class="primary">↻ Refresh</button>
+        <button id="emptySettings" class="ghost">⚙ Settings</button>
+      </p>
+      <p class="muted small">Logs are written under
+        <code>workspaceStorage/…/GitHub.copilot-chat/debug-logs/&lt;session&gt;/main.jsonl</code>.</p>
     </div>`;
 }
 
@@ -842,9 +963,24 @@ function formatMonthToDateRange(): string {
  * on the 1st of each month, like GitHub's credit meter. Still only the
  * sessions Copilot debug-logged on this machine.
  */
-function renderUsedCard(summary: Summary, config: CoachConfig): string {
+function renderUsedCard(summary: Summary, config: CoachConfig, daily: DaySpend[]): string {
   const showUsd = config.usdPerAiu > 0;
   const monthRange = formatMonthToDateRange();
+  const fmtNano = (nano: number) => (showUsd ? formatUsd(nano, config.usdPerAiu) : formatCost(nano));
+  // Daily spend trend under the headline — the "is this a spike or steady?" read.
+  // Interactive: hover anywhere to read off that day's spend.
+  const maxDay = Math.max(...daily.map((d) => d.total / 1e9), 0);
+  const spark =
+    daily.length >= 2
+      ? `<div class="card-spark">${lineChart(
+          daily.map((d) => ({
+            label: formatDateShort(d.ts),
+            value: d.total / 1e9,
+            tip: `${formatDateShort(d.ts)} · ${fmtNano(d.total)}`,
+          })),
+          { height: 54, min: 0, max: maxDay || 1, lineColor: CHART.blue, bare: true }
+        )}</div>`
+      : '';
   const loggedRange = formatCoverageRange(summary);
   const value = showUsd
     ? formatUsd(summary.totalCostNanoAiu, config.usdPerAiu)
@@ -858,10 +994,11 @@ function renderUsedCard(summary: Summary, config: CoachConfig): string {
     `1 credit = 1 AIU = $0.01. This figure comes only from the local debug logs; for your real ` +
     `account total, see Copilot's own credit meter (the Copilot status menu on github.com).`;
   return `
-    <div class="card card-budget">
+    <div class="card card-budget card-wide card-hero">
       <div class="card-label">Used · this month <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
       <div class="card-value">${escapeHtml(value)}</div>
       <div class="card-sub muted">${escapeHtml(formatCredits(summary.totalCostNanoAiu))} · ${escapeHtml(monthRange)}</div>
+      ${spark}
     </div>`;
 }
 
@@ -958,11 +1095,18 @@ function renderEfficiencyCard(eff: EfficiencyScore): string {
     `clean runs is the share of messages with no warning (large input, low mid-chat cache, ` +
     `heavy attachments, expensive request). Higher = cheaper. ` +
     `Aggregate cache hit rate: ${formatPercent(eff.cacheHitRate)}.`;
+  const col =
+    eff.score >= 75 ? CHART.green : eff.score >= 50 ? CHART.yellow : CHART.red;
   return `
     <div class="card card-eff ${gradeClass(eff.score)}">
       <div class="card-label">Efficiency <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
-      <div class="card-value"><span class="grade">${eff.grade}</span> <span class="muted score-of">${eff.score}/100</span></div>
-      <div class="card-sub muted">Cache reuse ${eff.cacheScore} · Clean ${eff.cleanScore} <span class="muted">(${eff.cleanMessages}/${eff.messageCount})</span></div>
+      <div class="card-ringrow">
+        ${ring(eff.score / 100, { label: eff.grade, sub: `${eff.score}`, color: col, size: 76, thickness: 8 })}
+        <div class="card-ringtext">
+          <div class="card-sub muted">Cache reuse ${eff.cacheScore}</div>
+          <div class="card-sub muted">Clean ${eff.cleanScore} <span class="muted">(${eff.cleanMessages}/${eff.messageCount})</span></div>
+        </div>
+      </div>
     </div>`;
 }
 
@@ -990,33 +1134,72 @@ function renderTokenMixCard(summary: Summary): string {
     `~80% cheaper. A high input share with very little output usually means lots of ` +
     `context was shovelled in for little produced work. Totals: ${formatTokens(fresh)} ` +
     `fresh input + ${formatTokens(cached)} cached input · ${formatTokens(output)} output.`;
+  const mixBar = segmentedBar(
+    [
+      { label: 'Fresh', value: fresh, color: SEMANTIC.fresh, tip: `Fresh input — ${formatTokens(fresh)} tok, billed full price` },
+      { label: 'Cached', value: cached, color: SEMANTIC.cached, tip: `Cached input — ${formatTokens(cached)} tok, ~80% cheaper` },
+      { label: 'Output', value: output, color: SEMANTIC.output, tip: `Output — ${formatTokens(output)} tok generated` },
+    ],
+    { legend: false }
+  );
   return `
-    <div class="card">
+    <div class="card card-wide">
       <div class="card-label">Token mix <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
       <div class="card-value">${inputPct}% <span class="muted score-of">in</span> · ${outputPct}% <span class="muted score-of">out</span></div>
+      <div class="card-mixbar">${mixBar}</div>
       <div class="card-sub muted">in: ${escapeHtml(formatTokensCompact(fresh))} fresh + ${escapeHtml(
         formatTokensCompact(cached)
       )} cached · out: ${escapeHtml(formatTokensCompact(output))}</div>
     </div>`;
 }
 
-/** Compact daily trend of the efficiency grade (the "saved history" view). */
+/** Colour for an efficiency score, matching the A–F grade bands. */
+function scoreColor(score: number): string {
+  return score >= 75 ? CHART.green : score >= 50 ? CHART.yellow : CHART.red;
+}
+
+/**
+ * Daily efficiency trend as an INTERACTIVE line chart: a fixed 0–100 scale with
+ * grade-band tints (so the height means something), dots coloured by grade, and
+ * a crosshair + tooltip that follows the mouse to read off any day's detail.
+ * The fixed scale is deliberate — auto-scaling made a few-point change look like
+ * a cliff; on 0–100 the line sits where it honestly is.
+ */
 function renderHistory(history: DailySnapshot[]): string {
   if (history.length < 2) {
     return ''; // need at least two days to call it a trend
   }
-  const chips = history
-    .slice(-14)
-    .map((h) => {
-      const tip = `${h.date}: grade ${h.grade} (${h.score}/100) · month ${formatCost(h.monthCostNanoAiu)} · ${formatTokensCompact(h.totalTokens)} tok`;
-      return `<span class="hist-chip ${gradeClass(h.score)} tip" data-tip="${escapeHtml(tip)}">
-        <span class="hist-grade">${h.grade}</span><span class="hist-date muted">${escapeHtml(h.date.slice(5))}</span></span>`;
-    })
-    .join('');
+  const recent = history.slice(-14);
+  const points = recent.map((h) => ({
+    label: h.date.slice(5),
+    value: h.score,
+    dotColor: scoreColor(h.score),
+    tip: `${h.date} · grade ${h.grade} · ${h.score}/100 · month ${formatCost(
+      h.monthCostNanoAiu
+    )} · ${formatTokensCompact(h.totalTokens)} tok`,
+  }));
+  const lastColor = scoreColor(recent[recent.length - 1].score);
+  const chart = lineChart(points, {
+    height: 150,
+    min: 0,
+    max: 100,
+    lineColor: lastColor,
+    gridAt: [50, 75],
+    bands: [
+      { from: 0, to: 50, color: 'color-mix(in srgb, var(--vscode-charts-red, #f14c4c) 9%, transparent)' },
+      { from: 50, to: 75, color: 'color-mix(in srgb, var(--vscode-charts-yellow, #d7ba7d) 9%, transparent)' },
+      { from: 75, to: 100, color: 'color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 9%, transparent)' },
+    ],
+  });
   return `
     <details class="history" open>
-      <summary>📈 Efficiency trend <span class="muted small">(daily snapshots — hover a day for details)</span></summary>
-      <div class="hist-row">${chips}</div>
+      <summary>📈 Efficiency trend <span class="muted small">(score 0–100 per day — hover the chart for that day’s detail)</span></summary>
+      <div class="hist-bands muted small">
+        <span class="hist-band-key"><span class="hist-band-dot" style="background:var(--vscode-charts-green,#4ec9b0)"></span>75–100 (A)</span>
+        <span class="hist-band-key"><span class="hist-band-dot" style="background:var(--vscode-charts-yellow,#d7ba7d)"></span>50–74 (B–C)</span>
+        <span class="hist-band-key"><span class="hist-band-dot" style="background:var(--vscode-charts-red,#f14c4c)"></span>below 50 (D–F)</span>
+      </div>
+      ${chart}
     </details>`;
 }
 
@@ -1109,17 +1292,136 @@ function renderTokenBreakdown(summary: Summary, config: CoachConfig): string {
     'total cost per request, so Token Coach distributes that real total across the buckets using the ' +
     'configurable price weights (tokenCoach.costInputWeight / costCachedInputWeight / costOutputWeight). ' +
     'The total AIU always matches the logs exactly.';
+  const tokDonut = donut(
+    [
+      { label: 'Fresh input', value: fresh, color: SEMANTIC.fresh, tip: `Fresh input — ${formatTokens(fresh)} tok (full price)` },
+      { label: 'Cached input', value: cached, color: SEMANTIC.cached, tip: `Cached input — ${formatTokens(cached)} tok (~80% cheaper)` },
+      { label: 'Output', value: output, color: SEMANTIC.output, tip: `Output — ${formatTokens(output)} tok` },
+    ],
+    { label: formatTokensCompact(tokenTotal), sub: 'tokens' }
+  );
+  const donutLegend = [
+    { label: 'Fresh input', color: SEMANTIC.fresh, tokens: fresh },
+    { label: 'Cached input', color: SEMANTIC.cached, tokens: cached },
+    { label: 'Output', color: SEMANTIC.output, tokens: output },
+  ]
+    .map(
+      (s) =>
+        `<span class="segbar-key"><span class="segbar-dot" style="background:${s.color}"></span>${s.label} <span class="muted">${escapeHtml(
+          formatTokensCompact(s.tokens)
+        )}</span></span>`
+    )
+    .join('');
   return `
     <details class="model-spend" open>
       <summary>🔬 Token &amp; cost breakdown
         <span class="muted small">(input ${inputPct}% / output ${100 - inputPct}% · per-bucket AIU is an estimate <span class="tip info" data-tip="${escapeHtml(
           help
         )}">ⓘ</span>)</span></summary>
-      <table class="mini">
-        <thead><tr><th>Bucket</th><th class="num">Tokens</th><th class="num">Token share</th><th class="num">AIU (est.)</th></tr></thead>
-        <tbody>${body}</tbody>
-      </table>
+      <div class="breakdown-row">
+        <div class="breakdown-viz">${tokDonut}<div class="segbar-legend">${donutLegend}</div></div>
+        <table class="mini">
+          <thead><tr><th>Bucket</th><th class="num">Tokens</th><th class="num">Token share</th><th class="num">AIU (est.)</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
     </details>`;
+}
+
+/**
+ * "Spend over the month" — the headline column chart: daily credits, each day's
+ * column split into fresh / cached / output. The single most useful view a cost
+ * dashboard can open with (are you spiking or steady?). Idle days show as gaps.
+ */
+function renderSpendChart(daily: DaySpend[], config: CoachConfig): string {
+  const active = daily.filter((d) => d.total > 0);
+  if (active.length < 1) {
+    return '';
+  }
+  const series: ColumnSeries[] = [
+    { key: 'fresh', label: 'Fresh input', color: SEMANTIC.fresh },
+    { key: 'cached', label: 'Cached input', color: SEMANTIC.cached },
+    { key: 'output', label: 'Output', color: SEMANTIC.output },
+  ];
+  const showUsd = config.usdPerAiu > 0;
+  const fmt = (nano: number) => (showUsd ? formatUsd(nano, config.usdPerAiu) : formatCost(nano));
+  const bars = daily.map((d) => ({
+    values: [d.fresh, d.cached, d.output],
+    tip:
+      d.total > 0
+        ? `${formatDateShort(d.ts)} — ${fmt(d.total)} · fresh ${formatCost(d.fresh)} / cached ${formatCost(
+            d.cached
+          )} / output ${formatCost(d.output)}`
+        : `${formatDateShort(d.ts)} — no logged usage`,
+  }));
+  const total = daily.reduce((s, d) => s + d.total, 0);
+  const peak = active.reduce((m, d) => (d.total > m.total ? d : m), active[0]);
+  const first = daily[0];
+  const last = daily[daily.length - 1];
+  const legend = series
+    .map(
+      (s) =>
+        `<span class="segbar-key"><span class="segbar-dot" style="background:${s.color}"></span>${escapeHtml(
+          s.label
+        )}</span>`
+    )
+    .join('');
+  return `
+    <div class="panel panel-chart">
+      <div class="panel-head">
+        <span class="panel-title">💵 Spend over the month</span>
+        <span class="panel-legend">${legend}</span>
+      </div>
+      <div class="chart-body">${columns(bars, series, { height: 150 })}</div>
+      <div class="chart-axis muted">
+        <span>${escapeHtml(formatDateShort(first.ts))}</span>
+        <span class="chart-axis-mid tip" data-tip="${escapeHtml(
+          `Highest-spend day this month: ${formatDateShort(peak.ts)} at ${fmt(peak.total)}.`
+        )}">▲ peak ${escapeHtml(fmt(peak.total))}</span>
+        <span>${escapeHtml(formatDateShort(last.ts))}</span>
+      </div>
+      <div class="panel-foot muted">${escapeHtml(fmt(total))} total this month · ${active.length} active day${
+        active.length === 1 ? '' : 's'
+      }</div>
+    </div>`;
+}
+
+/** "Spend by model" — the overview ranked bars (detail lives in the table below). */
+function renderModelBars(data: ParsedData, config: CoachConfig): string {
+  const rows = buildModelSpend(data, config);
+  if (rows.length === 0) {
+    return '';
+  }
+  const showUsd = config.usdPerAiu > 0;
+  const top = rows.slice(0, 7);
+  const bars = top.map((r) => {
+    const billed = r.cost > 0;
+    const usd = showUsd ? ` <span class="muted">(${escapeHtml(formatUsd(r.cost, config.usdPerAiu))})</span>` : '';
+    const tag = billed
+      ? '<span class="tag-billed">billed</span>'
+      : '<span class="tag-included">included</span>';
+    return {
+      labelHtml: `<span class="badge">${escapeHtml(r.model)}</span> ${tag}`,
+      value: r.cost,
+      valueHtml: `${escapeHtml(formatCost(r.cost))}${usd}`,
+      color: billed ? CHART.blue : CHART.green,
+      tip: `${r.requests.toLocaleString()} request${r.requests === 1 ? '' : 's'} · ${formatTokensCompact(
+        r.tokens
+      )} tokens · ${formatCost(r.cost)}`,
+    };
+  });
+  const more =
+    rows.length > top.length
+      ? `<div class="panel-foot muted">+${rows.length - top.length} more model${
+          rows.length - top.length === 1 ? '' : 's'
+        } — full detail in the table below</div>`
+      : '';
+  return `
+    <div class="panel panel-chart">
+      <div class="panel-head"><span class="panel-title">💸 Spend by model</span></div>
+      ${rankedBars(bars)}
+      ${more}
+    </div>`;
 }
 
 /** "Where your premium budget goes" — per-model spend table, billed vs included. */
@@ -1261,7 +1563,8 @@ function renderSummary(
   summary: Summary,
   efficiency: EfficiencyScore,
   inventory: ToolInventory,
-  config: CoachConfig
+  config: CoachConfig,
+  daily: DaySpend[]
 ): string {
   const priciest = summary.priciestMessage;
   const priciestText = priciest
@@ -1269,17 +1572,22 @@ function renderSummary(
         priciest.userMessage ? escapeHtml(priciest.userMessage) : ''
       }">(${escapeHtml(truncate(priciest.userMessage ?? '—', 28))})</span>`
     : '—';
+  // Cache ring: higher reuse is better, so it warms green as it climbs.
+  const cacheRate = summary.aggregateCacheHitRate;
+  const cacheCol = cacheRate >= 0.6 ? CHART.green : cacheRate >= 0.3 ? CHART.yellow : CHART.red;
   // Order: money first (month, today), then health (efficiency, cache),
   // then volume (activity), then waste signals (tools, priciest, flagged).
   return `
-    <div class="cards">
-      ${renderUsedCard(summary, config)}
+    <div class="cards kpi-grid">
+      ${renderUsedCard(summary, config, daily)}
       ${renderTodayCard(summary, config)}
       ${renderEfficiencyCard(efficiency)}
       <div class="card">
         <div class="card-label">Cache hit rate</div>
-        <div class="card-value">${escapeHtml(formatPercent(summary.aggregateCacheHitRate))}</div>
-        <div class="card-sub muted">cached input is ~80% cheaper</div>
+        <div class="card-ringrow">
+          ${ring(cacheRate, { label: formatPercent(cacheRate), color: cacheCol, size: 76, thickness: 8 })}
+          <div class="card-ringtext"><div class="card-sub muted">cached input is<br/>~80% cheaper</div></div>
+        </div>
       </div>
       ${renderTokenMixCard(summary)}
       <div class="card">
@@ -1312,7 +1620,8 @@ function renderHtml(
   config: CoachConfig,
   history: DailySnapshot[],
   nonce: string,
-  openState: Map<string, boolean>
+  openState: Map<string, boolean>,
+  loggingEnabled: boolean
 ): string {
   const csp = [
     `default-src 'none'`,
@@ -1325,17 +1634,22 @@ function renderHtml(
   const efficiency = computeEfficiencyFromChats(chats, config);
   const inventory = analyzeToolInventory(data);
   const unusedTrend = analyzeUnusedToolTrend(data, config.unusedToolMinChats);
+  const daily = buildDailySpend(data, config);
 
   const MAX_CHATS = 100;
   const shown = chats.slice(0, MAX_CHATS);
 
   const body =
     chats.length === 0
-      ? renderEmptyState()
+      ? renderEmptyState(loggingEnabled)
       : `
         ${renderUnusedToolTrend(unusedTrend)}
         ${renderCoverage(summary)}
-        ${renderSummary(summary, efficiency, inventory, config)}
+        ${renderSummary(summary, efficiency, inventory, config, daily)}
+        <div class="chart-row">
+          ${renderSpendChart(daily, config)}
+          ${renderModelBars(data, config)}
+        </div>
         ${renderHistory(history)}
         ${renderTokenBreakdown(summary, config)}
         ${renderModelSpend(data, config)}
@@ -1347,7 +1661,10 @@ function renderHtml(
         }
         <div class="hint muted">Grouped by chat. Click a chat to see its messages; click a message for cost drivers (tools &amp; context) and a turn-by-turn breakdown.</div>
         <div class="chats">
-          ${shown.map((c) => renderChat(c, config, openState)).join('')}
+          ${(() => {
+            const maxChatCost = Math.max(...shown.map((c) => c.totalCostNanoAiu), 1);
+            return shown.map((c) => renderChat(c, config, openState, maxChatCost)).join('');
+          })()}
         </div>`;
 
   return `<!DOCTYPE html>
@@ -1663,6 +1980,128 @@ function renderHtml(
       padding: 1px 5px; border-radius: 3px; font-family: var(--vscode-editor-font-family, monospace);
       overflow-wrap: anywhere;
     }
+
+    /* ===================================================================== */
+    /* Observability chart kit (charts.ts) — dense KPI grid + chart panels.   */
+    /* ===================================================================== */
+
+    /* KPI grid: cards on a real grid so tiles align in clean rows/columns. */
+    .cards.kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 12px; align-items: stretch;
+    }
+    .kpi-grid .card { display: flex; flex-direction: column; min-width: 0; }
+    .kpi-grid .card-budget { min-width: 0; }
+    .card-wide { grid-column: span 2; }
+    .card-hero .card-value { font-size: 1.95em; }
+    .card-spark { margin-top: 10px; }
+    .card-mixbar { margin-top: 10px; }
+    .card-ringrow { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
+    .card-ringtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; line-height: 1.35; }
+    @media (max-width: 520px) { .card-wide { grid-column: span 1; } }
+
+    /* SVG primitives */
+    .spark { display: block; width: 100%; }
+    .ring, .donut { flex: 0 0 auto; display: block; }
+    .ring-label { fill: var(--vscode-foreground); font-weight: 800; font-size: 19px;
+      font-variant-numeric: tabular-nums; font-family: var(--vscode-font-family); }
+    .ring-sub { fill: var(--vscode-descriptionForeground); font-size: 9px;
+      text-transform: uppercase; letter-spacing: .04em; font-family: var(--vscode-font-family); }
+    .donut .ring-label { font-size: 16px; }
+    .cols .col-hit { cursor: help; transition: fill 80ms ease; }
+    .cols .col-hit:hover { fill: color-mix(in srgb, var(--vscode-foreground) 7%, transparent); }
+
+    /* Chart panels (the main + secondary rows) */
+    .chart-row {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px; margin-bottom: 16px;
+    }
+    .panel {
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+      border-radius: 8px; padding: 12px 14px;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+      display: flex; flex-direction: column; min-width: 0;
+    }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+    .panel-title { font-weight: 600; }
+    .panel-legend { display: flex; gap: 10px 14px; flex-wrap: wrap; font-size: 0.8em; }
+    .panel-foot { font-size: 0.8em; margin-top: 8px; }
+    .chart-body { width: 100%; }
+    .chart-axis { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.75em; margin-top: 4px; gap: 8px; }
+    .chart-axis-mid { font-variant-numeric: tabular-nums; cursor: help; }
+
+    /* Ranked horizontal bars (model spend overview) */
+    .ranked { display: flex; flex-direction: column; gap: 9px; }
+    .ranked-row { display: grid; grid-template-columns: minmax(110px, 1.3fr) 2fr minmax(70px, auto); align-items: center; gap: 10px; }
+    .ranked-label { min-width: 0; overflow-wrap: anywhere; font-size: 0.9em; }
+    .ranked-track { height: 10px; border-radius: 5px; overflow: hidden;
+      background: var(--vscode-widget-border, rgba(127,127,127,0.22)); }
+    .ranked-fill { display: block; height: 100%; border-radius: 5px; }
+    .ranked-value { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 0.88em; }
+
+    /* 100%-segmented bar (token mix / context split) */
+    .segbar-wrap { width: 100%; }
+    .segbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden;
+      background: var(--vscode-widget-border, rgba(127,127,127,0.18)); }
+    .segbar-part { display: block; height: 100%; }
+    .segbar-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 0.82em; }
+    .segbar-key { display: inline-flex; align-items: center; gap: 5px; }
+    .segbar-dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: 0 0 auto; }
+
+    /* Token & cost breakdown — donut beside the table */
+    .breakdown-row { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+    .breakdown-viz { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 0 0 auto; }
+    .breakdown-viz .segbar-legend { flex-direction: column; gap: 4px; }
+    .breakdown-row table.mini { flex: 1 1 300px; }
+
+    /* Efficiency trend area-line above the day chips */
+    .hist-trend { margin-bottom: 12px; cursor: help; }
+
+    /* Per-chat relative cost bar (which chats cost the most, at a glance) */
+    .chat-bar { height: 4px; border-radius: 3px; margin-top: 8px; cursor: help;
+      background: var(--vscode-widget-border, rgba(127,127,127,0.18)); overflow: hidden; }
+    .chat-bar-fill { display: block; height: 100%; border-radius: 3px;
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 80%, transparent); }
+
+    /* Interactive line chart (efficiency trend) — SVG plot + HTML dot overlay */
+    .hist-bands { display: flex; gap: 14px; flex-wrap: wrap; margin: 2px 0 8px; }
+    .hist-band-key { display: inline-flex; align-items: center; gap: 5px; }
+    .hist-band-dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; opacity: 0.85; }
+    .linechart-wrap { margin-top: 2px; }
+    .linechart-plot { position: relative; width: 100%; cursor: crosshair; }
+    .linechart-svg { display: block; width: 100%; border-radius: 4px;
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.18)); }
+    .lc-dots { position: absolute; inset: 0; pointer-events: none; }
+    /* HTML dots stay perfectly round regardless of the SVG's horizontal stretch. */
+    .lc-dot { position: absolute; width: 7px; height: 7px; border-radius: 50%;
+      transform: translate(-50%, -50%); border: 1.5px solid var(--vscode-editor-background); }
+    .lc-cross { position: absolute; top: 0; bottom: 0; width: 1px; display: none;
+      background: var(--vscode-charts-foreground, var(--vscode-foreground)); opacity: 0.4;
+      pointer-events: none; transform: translateX(-0.5px); }
+    .lc-hot { position: absolute; width: 11px; height: 11px; border-radius: 50%; display: none;
+      transform: translate(-50%, -50%); pointer-events: none;
+      box-shadow: 0 0 0 3px var(--vscode-editor-background); }
+    .lc-hit { position: absolute; inset: 0; }
+    .linechart-x { display: flex; justify-content: space-between; margin-top: 6px; font-size: 0.75em; gap: 4px; }
+    .lc-xlabel { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    /* Bare "sparkline" mode for KPI cards: no chrome, just the interactive trend. */
+    .linechart-wrap.bare .linechart-svg { border: none; border-radius: 0; }
+
+    /* Onboarding: empty-state action buttons */
+    .empty-icon { font-size: 2.4em; line-height: 1; margin-bottom: 6px; }
+    .empty h2 { margin: 4px 0 10px; }
+    .empty-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+    button.primary {
+      font-size: 1.02em; padding: 9px 16px; font-weight: 600;
+      background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    }
+    button.primary:hover { background: var(--vscode-button-hoverBackground); }
+    button.ghost {
+      background: transparent; color: var(--vscode-foreground);
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.45)); padding: 9px 16px;
+    }
+    button.ghost:hover { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
   </style>
 </head>
 <body>
@@ -1671,6 +2110,7 @@ function renderHtml(
     ${extensionVersion ? `<span class="ver">v${escapeHtml(extensionVersion)}</span>` : ''}
     <button id="refresh" title="Re-scan logs">↻ Refresh</button>
     <button id="export" title="Save a Markdown report">⤓ Export</button>
+    <button id="settings" title="Open Token Coach settings">⚙ Settings</button>
     <span class="muted">Usage in credits (1 credit = 1 AIU = $0.01). Context sizes are estimates (~4 chars ≈ 1 token).</span>
   </div>
   ${body}
@@ -1729,6 +2169,56 @@ function renderHtml(
     // stale — hide it rather than let it drift away from its anchor.
     window.addEventListener('scroll', hideTip, { passive: true, capture: true });
 
+    // Interactive line charts: a crosshair + a tooltip that follows the mouse,
+    // reading off the nearest day's detail. Point data is the data-pts JSON the
+    // lineChart() helper emits (positions as %, plus colour + tip text).
+    document.querySelectorAll('.linechart-plot').forEach((plot) => {
+      let pts;
+      try { pts = JSON.parse(plot.dataset.pts || '[]'); } catch (err) { pts = []; }
+      if (!pts.length) { return; }
+      const cross = plot.querySelector('.lc-cross');
+      const hot = plot.querySelector('.lc-hot');
+      const len = pts.length;
+
+      function moveTo(clientX) {
+        const rect = plot.getBoundingClientRect();
+        if (!rect.width) { return; }
+        let frac = (clientX - rect.left) / rect.width;
+        frac = Math.max(0, Math.min(1, frac));
+        const i = Math.round(frac * (len - 1));
+        const p = pts[i];
+        if (!p) { return; }
+        if (cross) { cross.style.left = p.x + '%'; cross.style.display = 'block'; }
+        if (hot) {
+          hot.style.left = p.x + '%'; hot.style.top = p.y + '%';
+          hot.style.background = p.c; hot.style.display = 'block';
+        }
+        tt.textContent = p.t;
+        tt.classList.add('show');
+        const PAD = 8, GAP = 12;
+        const tw = tt.offsetWidth, th = tt.offsetHeight;
+        const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+        const px = rect.left + (p.x / 100) * rect.width;
+        const py = rect.top + (p.y / 100) * rect.height;
+        let top = py - GAP - th;
+        if (top < PAD) { top = py + GAP; }
+        if (top + th > vh - PAD) { top = Math.max(PAD, vh - th - PAD); }
+        let left = px - tw / 2;
+        if (left + tw > vw - PAD) { left = vw - tw - PAD; }
+        if (left < PAD) { left = PAD; }
+        tt.style.left = left + 'px';
+        tt.style.top = top + 'px';
+      }
+
+      plot.addEventListener('mousemove', (e) => moveTo(e.clientX));
+      plot.addEventListener('mouseleave', (e) => {
+        if (cross) { cross.style.display = 'none'; }
+        if (hot) { hot.style.display = 'none'; }
+        const to = e.relatedTarget;
+        if (!(to && to.closest && to.closest('[data-tip]'))) { hideTip(); }
+      });
+    });
+
     const btn = document.getElementById('refresh');
     if (btn) {
       btn.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
@@ -1737,6 +2227,16 @@ function renderHtml(
     if (exportBtn) {
       exportBtn.addEventListener('click', () => vscode.postMessage({ command: 'export' }));
     }
+    // Onboarding + toolbar buttons. Each has a unique id so there's no
+    // duplicate-id clash with the toolbar's Refresh.
+    const wire = (id, command) => {
+      const el = document.getElementById(id);
+      if (el) { el.addEventListener('click', () => vscode.postMessage({ command })); }
+    };
+    wire('enableLogging', 'enableLogging');
+    wire('emptyRefresh', 'refresh');
+    wire('settings', 'openSettings');
+    wire('emptySettings', 'openSettings');
 
     // Report expand/collapse (chats and messages) so the extension keeps them as
     // they were across refreshes. ('toggle' doesn't bubble, so attach to each.)
@@ -1787,6 +2287,9 @@ export class DashboardPanel {
    */
   private readonly openState = new Map<string, boolean>();
 
+  /** Whether Copilot debug logging is on — drives which empty state we show. */
+  private loggingEnabled = true;
+
   private constructor(
     panel: vscode.WebviewPanel,
     private readonly onRefreshRequested: () => void
@@ -1799,6 +2302,10 @@ export class DashboardPanel {
       (message) => {
         if (message?.command === 'refresh') {
           this.onRefreshRequested();
+        } else if (message?.command === 'enableLogging') {
+          void vscode.commands.executeCommand('tokenCoach.enableLogging');
+        } else if (message?.command === 'openSettings') {
+          void vscode.commands.executeCommand('tokenCoach.openSettings');
         } else if (message?.command === 'export') {
           void vscode.commands.executeCommand('tokenCoach.exportReport');
         } else if (message?.command === 'toggle' && typeof message.id === 'string') {
@@ -1816,13 +2323,14 @@ export class DashboardPanel {
     data: ParsedData,
     config: CoachConfig,
     onRefreshRequested: () => void,
-    history: DailySnapshot[] = []
+    history: DailySnapshot[] = [],
+    loggingEnabled = true
   ): DashboardPanel {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
     if (DashboardPanel.current) {
       DashboardPanel.current.panel.reveal(column);
-      DashboardPanel.current.update(data, config, history);
+      DashboardPanel.current.update(data, config, history, loggingEnabled);
       return DashboardPanel.current;
     }
 
@@ -1834,12 +2342,14 @@ export class DashboardPanel {
     );
 
     DashboardPanel.current = new DashboardPanel(panel, onRefreshRequested);
-    DashboardPanel.current.update(data, config, history);
+    DashboardPanel.current.update(data, config, history, loggingEnabled);
     return DashboardPanel.current;
   }
 
   /** Re-render with fresh data. Safe to call when the panel is hidden. */
-  update(data: ParsedData, config: CoachConfig, history: DailySnapshot[] = []): void {
+  update(data: ParsedData, config: CoachConfig, history: DailySnapshot[] = [], loggingEnabled = true): void {
+    this.loggingEnabled = loggingEnabled;
+
     // Surface "how much you've used" in the editor tab title (no token count).
     let cost = 0;
     for (const r of data.requests) {
@@ -1851,7 +2361,15 @@ export class DashboardPanel {
         : `Token Coach · ${formatCredits(cost)}`;
 
     const nonce = makeNonce();
-    this.panel.webview.html = renderHtml(this.panel.webview, data, config, history, nonce, this.openState);
+    this.panel.webview.html = renderHtml(
+      this.panel.webview,
+      data,
+      config,
+      history,
+      nonce,
+      this.openState,
+      this.loggingEnabled
+    );
   }
 
   dispose(): void {

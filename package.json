@@ -2,7 +2,7 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "publisher": "NadavLAN",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -62,118 +62,152 @@
         "command": "tokenCoach.openSettings",
         "title": "Token Coach: Open Settings",
         "icon": "$(gear)"
+      },
+      {
+        "command": "tokenCoach.enableLogging",
+        "title": "Token Coach: Enable Copilot Logging",
+        "icon": "$(check)"
       }
     ],
-    "configuration": {
-      "title": "Token Coach",
-      "properties": {
-        "tokenCoach.costWarnThreshold": {
-          "type": "number",
-          "default": 3000000000,
-          "markdownDescription": "Flag any request whose cost (in `copilotUsageNanoAiu`) exceeds this value. Default `3000000000` (= 3 AIU)."
-        },
-        "tokenCoach.inputWarnThreshold": {
-          "type": "number",
-          "default": 50000,
-          "markdownDescription": "Flag any request whose `inputTokens` exceed this value. Default `50000`."
-        },
-        "tokenCoach.lowCacheRateThreshold": {
-          "type": "number",
-          "default": 0.5,
-          "minimum": 0,
-          "maximum": 1,
-          "markdownDescription": "Flag requests whose cache hit rate (`cachedTokens / inputTokens`) is below this value (only when input is also large — see `lowCacheMinInputTokens`). Default `0.5`."
-        },
-        "tokenCoach.lowCacheMinInputTokens": {
-          "type": "number",
-          "default": 20000,
-          "markdownDescription": "Minimum `inputTokens` before the low-cache-hit rule fires. Avoids nagging on tiny requests. Default `20000`."
-        },
-        "tokenCoach.ioRatioThreshold": {
-          "type": "number",
-          "default": 1000,
-          "markdownDescription": "Flag requests where `inputTokens / outputTokens` exceeds this value (huge input, tiny output). Default `1000`."
-        },
-        "tokenCoach.ioMinInputTokens": {
-          "type": "number",
-          "default": 10000,
-          "markdownDescription": "Minimum `inputTokens` before the tiny-output rule fires, so small side-calls (e.g. a 2-token reply on 2K input) aren't mislabelled as 'huge input'. Default `10000`."
-        },
-        "tokenCoach.attachmentShareWarn": {
-          "type": "number",
-          "default": 0.4,
-          "minimum": 0,
-          "maximum": 1,
-          "markdownDescription": "Flag a message when open/attached files make up more than this share of its **logged** context (Copilot only itemizes context on the first turn; the system prompt and cached history aren't included). Default `0.4` (40%)."
-        },
-        "tokenCoach.slowToolWarnMs": {
-          "type": "number",
-          "default": 10000,
-          "markdownDescription": "Flag a message when a single tool consumes more than this many milliseconds (summed across calls). Default `10000` (10s)."
-        },
-        "tokenCoach.cacheIdleMinutes": {
-          "type": "number",
-          "default": 5,
-          "minimum": 0,
-          "markdownDescription": "Idle minutes after which the prompt cache is assumed to have expired. If a mid-chat message arrives after a longer pause **and** its cache reuse actually dropped, it's flagged as `cache-expired-idle`. The Claude (Anthropic) cache TTL is ~5 min (sliding); OpenAI's is ~5–10 min. Set `0` to disable idle detection."
-        },
-        "tokenCoach.unusedToolMinChats": {
-          "type": "number",
-          "default": 3,
-          "minimum": 1,
-          "markdownDescription": "How consistently a tool must go unused before the dashboard flags it as a candidate to disable. Uses a **net counter**: +1 for each chat the tool was offered but never called, −1 (floored at `0`) for each chat it *was* called in. Once the score reaches this value the tool is listed at the top of the dashboard; if you use it again later the score falls and it drops off the list. Default `3`."
-        },
-        "tokenCoach.usdPerAiu": {
-          "type": "number",
-          "default": 0.01,
-          "markdownDescription": "US dollars per 1 AIU. GitHub's June 2026 usage-based billing prices **1 AI credit = $0.01**, and 1 AIU ≈ 1 AI credit, so the default is `0.01`. Set to `0` to hide dollar estimates."
-        },
-        "tokenCoach.costInputWeight": {
-          "type": "number",
-          "default": 1,
-          "minimum": 0,
-          "markdownDescription": "Relative price weight for **fresh (uncached) input** tokens. Used only to split each request's real, logged AIU across input / cached-input / output for the breakdown — the log stores a single total per request, so the per-bucket split is an **estimate** while the total stays exact. This is the baseline (`1`)."
-        },
-        "tokenCoach.costCachedInputWeight": {
-          "type": "number",
-          "default": 0.1,
-          "minimum": 0,
-          "markdownDescription": "Relative price weight for **cached input** tokens, used for the AIU breakdown split (see `#tokenCoach.costInputWeight#`). Cached reads are billed far cheaper, so the default is `0.1` (~10% of fresh input)."
-        },
-        "tokenCoach.costOutputWeight": {
-          "type": "number",
-          "default": 4,
-          "minimum": 0,
-          "markdownDescription": "Relative price weight for **output** tokens, used for the AIU breakdown split (see `#tokenCoach.costInputWeight#`). Output is typically the most expensive, so the default is `4` (~4× fresh input)."
-        },
-        "tokenCoach.planMonthlyUsd": {
-          "type": "number",
-          "default": 19,
-          "markdownDescription": "Your monthly Copilot plan price per user (Copilot **Business = $19**, **Enterprise / Pro+ = $39**). Used only to tint the status bar when this month's spend gets large; the dashboard shows what you used, not a quota."
-        },
-        "tokenCoach.notifyOnExpensiveRequest": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Show a notification when a newly logged request exceeds the cost threshold."
-        },
-        "tokenCoach.notifyOnInefficiency": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Show a gentle, throttled nudge when a new message shows an actionable inefficiency (cache went cold mid-chat, or open/attached files dominate context). At most one nudge every 5 minutes."
-        },
-        "tokenCoach.pollIntervalSeconds": {
-          "type": "number",
-          "default": 20,
-          "minimum": 0,
-          "markdownDescription": "Backup polling interval (seconds) used in addition to the file watcher. Set to `0` to disable polling and rely on the watcher only."
-        },
-        "tokenCoach.workspaceStoragePathOverride": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Optional absolute path to a `workspaceStorage` directory. Useful for testing or non-standard installs. Leave empty to auto-detect the standard per-OS locations."
+    "configuration": [
+      {
+        "title": "Token Coach",
+        "order": 0,
+        "properties": {
+          "tokenCoach.notifyOnExpensiveRequest": {
+            "type": "boolean",
+            "default": true,
+            "order": 1,
+            "markdownDescription": "**Pop up a notification when a single Copilot request costs a lot** (above the cost threshold in *Token Coach: Warnings*). Turn off for silent tracking."
+          },
+          "tokenCoach.notifyOnInefficiency": {
+            "type": "boolean",
+            "default": true,
+            "order": 2,
+            "markdownDescription": "**Show a gentle, occasional tip when a message wastes money in a fixable way** — the cache went cold mid-chat, or open/attached files dominate the context. At most one tip every 5 minutes."
+          },
+          "tokenCoach.usdPerAiu": {
+            "type": "number",
+            "default": 0.01,
+            "order": 3,
+            "markdownDescription": "**Dollars per credit, for the `$` estimates.** GitHub bills **1 AI credit = $0.01**, so the default is `0.01`. Set to `0` to hide all dollar amounts and show credits only."
+          },
+          "tokenCoach.planMonthlyUsd": {
+            "type": "number",
+            "default": 19,
+            "order": 4,
+            "markdownDescription": "**Your monthly Copilot plan price** (Business `$19`, Enterprise / Pro+ `$39`). Only used to tint the status bar as the month's spend grows — Token Coach shows what you *used*, never a quota."
+          }
+        }
+      },
+      {
+        "title": "Token Coach: Warnings",
+        "order": 1,
+        "properties": {
+          "tokenCoach.costWarnThreshold": {
+            "type": "number",
+            "default": 3,
+            "minimum": 0,
+            "order": 1,
+            "markdownDescription": "**Flag a request that costs more than this many credits.** Default `3` credits _(1 credit = 1 AIU = $0.01)_."
+          },
+          "tokenCoach.inputWarnThreshold": {
+            "type": "number",
+            "default": 50000,
+            "order": 2,
+            "markdownDescription": "**Flag a request that sends more than this many input tokens** — a big, expensive prompt. Default `50000`."
+          },
+          "tokenCoach.lowCacheRateThreshold": {
+            "type": "number",
+            "default": 0.5,
+            "minimum": 0,
+            "maximum": 1,
+            "order": 3,
+            "markdownDescription": "**Flag a request that reuses less than this share of its prompt cache** (`cachedTokens / inputTokens`), but only when the prompt is also large (see *Low-cache minimum input* below). Default `0.5` (50%)."
+          },
+          "tokenCoach.lowCacheMinInputTokens": {
+            "type": "number",
+            "default": 20000,
+            "order": 4,
+            "markdownDescription": "**Smallest prompt the low-cache warning applies to** — keeps tiny requests from being nagged. Default `20000` input tokens."
+          },
+          "tokenCoach.ioRatioThreshold": {
+            "type": "number",
+            "default": 1000,
+            "order": 5,
+            "markdownDescription": "**Flag a request where input dwarfs output** (`inputTokens / outputTokens` above this) — lots of context sent for little produced. Default `1000`."
+          },
+          "tokenCoach.ioMinInputTokens": {
+            "type": "number",
+            "default": 10000,
+            "order": 6,
+            "markdownDescription": "**Smallest prompt the input-dwarfs-output warning applies to**, so small side-calls aren't mislabelled. Default `10000` input tokens."
+          },
+          "tokenCoach.attachmentShareWarn": {
+            "type": "number",
+            "default": 0.4,
+            "minimum": 0,
+            "maximum": 1,
+            "order": 7,
+            "markdownDescription": "**Flag a message when open / attached files make up more than this share of its logged context.** Default `0.4` (40%). _(Copilot only itemizes context on the first turn, so cached history isn't counted.)_"
+          },
+          "tokenCoach.slowToolWarnMs": {
+            "type": "number",
+            "default": 10000,
+            "order": 8,
+            "markdownDescription": "**Flag a message when one tool takes longer than this** (milliseconds, summed across its calls). Default `10000` (10s)."
+          },
+          "tokenCoach.cacheIdleMinutes": {
+            "type": "number",
+            "default": 5,
+            "minimum": 0,
+            "order": 9,
+            "markdownDescription": "**Idle minutes after which the prompt cache is assumed to have expired.** If a mid-chat message arrives after a longer pause **and** its cache reuse actually dropped, it's flagged. Claude's cache TTL is ~5 min; OpenAI's ~5–10. Set `0` to disable idle detection."
+          }
+        }
+      },
+      {
+        "title": "Token Coach: Advanced",
+        "order": 2,
+        "properties": {
+          "tokenCoach.costInputWeight": {
+            "type": "number",
+            "default": 1,
+            "minimum": 0,
+            "order": 1,
+            "markdownDescription": "_(Advanced)_ Price weight for **fresh (uncached) input** when splitting each request's real logged cost into input / cached / output for the breakdown. The total stays exact — only the split is estimated. Baseline `1`."
+          },
+          "tokenCoach.costCachedInputWeight": {
+            "type": "number",
+            "default": 0.1,
+            "minimum": 0,
+            "order": 2,
+            "markdownDescription": "_(Advanced)_ Price weight for **cached input** in the cost split (see `#tokenCoach.costInputWeight#`). Cached reads are far cheaper, so `0.1` (~10% of fresh input)."
+          },
+          "tokenCoach.costOutputWeight": {
+            "type": "number",
+            "default": 4,
+            "minimum": 0,
+            "order": 3,
+            "markdownDescription": "_(Advanced)_ Price weight for **output** in the cost split (see `#tokenCoach.costInputWeight#`). Output is the priciest, so `4` (~4× fresh input)."
+          },
+          "tokenCoach.unusedToolMinChats": {
+            "type": "number",
+            "default": 3,
+            "minimum": 1,
+            "order": 4,
+            "markdownDescription": "_(Advanced)_ **How consistently a tool must go unused before it's flagged** as a candidate to disable. Net counter: +1 for each chat the tool was offered but never called, −1 (floored at `0`) for each chat it *was* used in. Default `3`."
+          },
+          "tokenCoach.pollIntervalSeconds": {
+            "type": "number",
+            "default": 20,
+            "minimum": 0,
+            "order": 5,
+            "markdownDescription": "_(Advanced)_ **Backup refresh interval** (seconds), on top of the live file watcher. Set to `0` to rely on the watcher only. Default `20`."
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

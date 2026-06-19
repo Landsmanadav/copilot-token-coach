@@ -15,7 +15,7 @@
   <a href="https://marketplace.visualstudio.com/items?itemName=NadavLAN.token-coach"><img alt="Install on VS Marketplace" src="https://img.shields.io/badge/VS%20Marketplace-Install-blue?logo=visualstudiocode"></a>
 </p>
 
-![Token Coach dashboard — summary cards, per-model spend, and per-chat cost breakdown](images/dashboard.png)
+![Token Coach dashboard — KPI grid with efficiency & cache rings, a spend-over-the-month column chart, spend-by-model bars, and an interactive efficiency trend](images/dashboard.png)
 
 > 📘 See **[GUIDE.md](GUIDE.md)** for what we built & how it works, plus detailed
 > **local-install** and **publishing** instructions.
@@ -35,6 +35,16 @@ So this tool surfaces:
 
 ## Features
 
+- **Chart-driven dashboard** — a dense KPI grid (efficiency & cache **rings**, an
+  interactive daily-spend **sparkline**), a **spend-over-the-month** stacked-column
+  chart (fresh / cached / output, with the spike days obvious), **spend-by-model**
+  ranked bars, a token-mix **donut**, and an **interactive efficiency-trend** line
+  chart with a crosshair + tooltip that follows the mouse. All hand-built **inline
+  SVG** — zero dependencies, themed to VS Code's chart palette, and fully inside the
+  webview's strict CSP.
+- **One-click onboarding** — if Copilot debug logging is off, the dashboard shows an
+  **⚡ Enable Copilot logging** button that flips the two settings for you; a **⚙
+  Settings** button is one click away in the toolbar.
 - **Log parser** — finds every `main.jsonl` under VS Code's `workspaceStorage`
   (cross-platform), parses it line-by-line, and tolerates malformed lines.
 - **Rules engine** — flags expensive requests, low cache hits on large inputs,
@@ -181,11 +191,11 @@ npm install -g @vscode/vsce   # if you don't have it
 npm run package               # runs `vsce package`
 ```
 
-This produces `token-coach-0.5.0.vsix`, which you can install with
+This produces `token-coach-2.0.0.vsix`, which you can install with
 **Extensions: Install from VSIX…** or:
 
 ```bash
-code --install-extension token-coach-0.5.0.vsix
+code --install-extension token-coach-2.0.0.vsix
 ```
 
 ## Settings
@@ -196,7 +206,7 @@ them), or in your `settings.json`. Nothing is hard-coded.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `tokenCoach.costWarnThreshold` | `3000000000` | Flag cost (NanoAiu) above this (= 3 AIU). |
+| `tokenCoach.costWarnThreshold` | `3` | Flag a request that costs more than this many **credits** (1 credit = 1 AIU = $0.01). |
 | `tokenCoach.inputWarnThreshold` | `50000` | Flag `inputTokens` above this. |
 | `tokenCoach.lowCacheRateThreshold` | `0.5` | Cache hit rate below this is "low". |
 | `tokenCoach.lowCacheMinInputTokens` | `20000` | Minimum input before the low-cache rule fires. |
@@ -211,7 +221,10 @@ them), or in your `settings.json`. Nothing is hard-coded.
 | `tokenCoach.notifyOnExpensiveRequest` | `true` | Notify when a new request exceeds the cost threshold. |
 | `tokenCoach.notifyOnInefficiency` | `true` | Gentle, throttled nudge (≤1 / 5 min) on a new message's actionable inefficiency (cache cold mid-chat, heavy attachments). |
 | `tokenCoach.pollIntervalSeconds` | `20` | Backup poll interval; `0` disables polling. |
-| `tokenCoach.workspaceStoragePathOverride` | `""` | Optional explicit `workspaceStorage` path (testing / non-standard installs). |
+
+> For a non-standard install, you can still point the scanner at an explicit
+> `workspaceStorage` directory by setting `tokenCoach.workspaceStoragePathOverride`
+> in your `settings.json` (it's no longer shown in the Settings UI).
 
 ## Cost in dollars (credits)
 

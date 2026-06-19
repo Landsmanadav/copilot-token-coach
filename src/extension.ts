@@ -32,6 +32,16 @@ import {
 
 const CONFIG_SECTION = 'tokenCoach';
 
+/** The two Copilot settings that turn on the local debug logs Token Coach reads. */
+const COPILOT_LOG_SECTION = 'github.copilot.chat.agentDebugLog';
+const COPILOT_LOG_KEYS = ['enabled', 'fileLogging.enabled'] as const;
+
+/** True only when BOTH Copilot debug-log settings are on. */
+function isLoggingEnabled(): boolean {
+  const cfg = vscode.workspace.getConfiguration(COPILOT_LOG_SECTION);
+  return COPILOT_LOG_KEYS.every((k) => cfg.get<boolean>(k, false) === true);
+}
+
 let statusBarItem: vscode.StatusBarItem;
 let watchers: vscode.FileSystemWatcher[] = [];
 let pollTimer: NodeJS.Timeout | undefined;
@@ -73,7 +83,9 @@ const NUDGE_COOLDOWN_MS = 5 * 60 * 1000;
 function getCoachConfig(): CoachConfig {
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
   return {
-    costWarnThreshold: cfg.get('costWarnThreshold', DEFAULT_COACH_CONFIG.costWarnThreshold),
+    // The setting is in credits (user-friendly); convert to NanoAiu (1 credit = 1e9)
+    // for the internal comparison against each request's costNanoAiu.
+    costWarnThreshold: Math.round(cfg.get<number>('costWarnThreshold', 3) * 1e9),
     inputWarnThreshold: cfg.get('inputWarnThreshold', DEFAULT_COACH_CONFIG.inputWarnThreshold),
     lowCacheRateThreshold: cfg.get('lowCacheRateThreshold', DEFAULT_COACH_CONFIG.lowCacheRateThreshold),
     lowCacheMinInputTokens: cfg.get('lowCacheMinInputTokens', DEFAULT_COACH_CONFIG.lowCacheMinInputTokens),
@@ -280,7 +292,7 @@ async function refresh(): Promise<void> {
   updateStatusBar(data, config, totalLogged > data.requests.length);
 
   if (DashboardPanel.current) {
-    DashboardPanel.current.update(data, config, getHistory());
+    DashboardPanel.current.update(data, config, getHistory(), isLoggingEnabled());
   }
 
   detectAndNotifyNew(data.requests, config);
@@ -427,8 +439,32 @@ async function showDashboard(): Promise<void> {
   primed = true;
   nudgePrimed = true;
   await recordSnapshot(data, config);
-  DashboardPanel.createOrShow(data, config, () => void refresh(), getHistory());
+  DashboardPanel.createOrShow(data, config, () => void refresh(), getHistory(), isLoggingEnabled());
   updateStatusBar(data, config, raw.requests.length > data.requests.length);
+}
+
+/**
+ * One-click onboarding: flip the two Copilot debug-log settings on (User scope),
+ * so the user doesn't have to hunt for setting ids. Then refresh so the panel
+ * reflects the new state.
+ */
+async function enableLogging(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration(COPILOT_LOG_SECTION);
+  try {
+    for (const key of COPILOT_LOG_KEYS) {
+      await cfg.update(key, true, vscode.ConfigurationTarget.Global);
+    }
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Token Coach: couldn't enable Copilot logging automatically (${String(err)}). ` +
+        `Set ${COPILOT_LOG_SECTION}.enabled and .fileLogging.enabled to true in Settings.`
+    );
+    return;
+  }
+  vscode.window.showInformationMessage(
+    'Token Coach: Copilot debug logging is on. Use Copilot Chat a few times, then Refresh — your usage will appear here.'
+  );
+  await refresh();
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +637,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('tokenCoach.showDashboard', () => void showDashboard()),
     vscode.commands.registerCommand('tokenCoach.refresh', () => void refresh()),
     vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport()),
+    vscode.commands.registerCommand('tokenCoach.enableLogging', () => void enableLogging()),
     // Open VS Code's Settings UI pre-filtered to this extension's settings.
     vscode.commands.registerCommand('tokenCoach.openSettings', () =>
       void vscode.commands.executeCommand('workbench.action.openSettings', `@ext:${context.extension.id}`)

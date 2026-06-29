@@ -71,7 +71,7 @@ export interface CoachConfig {
 
 /** Sensible defaults, mirroring the values declared in package.json. */
 export const DEFAULT_COACH_CONFIG: CoachConfig = {
-  costWarnThreshold: 3_000_000_000,
+  costWarnThreshold: 25_000_000_000,
   inputWarnThreshold: 50_000,
   lowCacheRateThreshold: 0.5,
   lowCacheMinInputTokens: 20_000,

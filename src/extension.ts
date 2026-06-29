@@ -85,7 +85,7 @@ function getCoachConfig(): CoachConfig {
   return {
     // The setting is in credits (user-friendly); convert to NanoAiu (1 credit = 1e9)
     // for the internal comparison against each request's costNanoAiu.
-    costWarnThreshold: Math.round(cfg.get<number>('costWarnThreshold', 3) * 1e9),
+    costWarnThreshold: Math.round(cfg.get<number>('costWarnThreshold', 25) * 1e9),
     inputWarnThreshold: cfg.get('inputWarnThreshold', DEFAULT_COACH_CONFIG.inputWarnThreshold),
     lowCacheRateThreshold: cfg.get('lowCacheRateThreshold', DEFAULT_COACH_CONFIG.lowCacheRateThreshold),
     lowCacheMinInputTokens: cfg.get('lowCacheMinInputTokens', DEFAULT_COACH_CONFIG.lowCacheMinInputTokens),
@@ -301,6 +301,46 @@ async function refresh(): Promise<void> {
 }
 
 /**
+ * Show a notification that closes itself after a few seconds, so alerts and tips
+ * never pile up in the corner. The delay is configurable
+ * (`tokenCoach.notificationAutoDismissSeconds`, default 3).
+ *
+ * VS Code's `showWarningMessage` / `showInformationMessage` stay until clicked
+ * and can't be dismissed from code, so for the auto-close path we render the
+ * message as a notification-area progress task that resolves on a timer. Set the
+ * setting to `0` to opt back into a classic sticky notification that carries an
+ * "Open Dashboard" button.
+ */
+function notifyAutoDismiss(kind: 'warning' | 'info', message: string): void {
+  const seconds = vscode.workspace
+    .getConfiguration(CONFIG_SECTION)
+    .get<number>('notificationAutoDismissSeconds', 3);
+
+  // 0 (or unset to a non-positive value) → keep the classic sticky notification
+  // with a button, since a button can't survive the auto-dismiss path.
+  if (!seconds || seconds <= 0) {
+    const open = (choice?: string) => {
+      if (choice === 'Open Dashboard') {
+        void showDashboard();
+      }
+    };
+    const sticky =
+      kind === 'warning'
+        ? vscode.window.showWarningMessage(message, 'Open Dashboard')
+        : vscode.window.showInformationMessage(message, 'Open Dashboard');
+    void sticky.then(open);
+    return;
+  }
+
+  // Auto-dismiss path: a notification-area task that simply waits, then resolves
+  // so VS Code closes it for us.
+  void vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: message },
+    () => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000))
+  );
+}
+
+/**
  * Notify about newly-logged expensive requests. On the first run we just record
  * the existing ids so we don't fire a burst of notifications for old data.
  */
@@ -337,16 +377,10 @@ function detectAndNotifyNew(records: LlmRequestRecord[], config: CoachConfig): v
       .join(' ');
     // A cost alert takes priority, so let it suppress softer nudges for a while.
     lastNudgeMs = Date.now();
-    vscode.window
-      .showWarningMessage(
-        `Expensive Copilot request: ${formatCost(worst.costNanoAiu)} on ${worst.model}${extra}. ${advice}`,
-        'Open Dashboard'
-      )
-      .then((choice) => {
-        if (choice === 'Open Dashboard') {
-          void showDashboard();
-        }
-      });
+    notifyAutoDismiss(
+      'warning',
+      `Expensive Copilot request: ${formatCost(worst.costNanoAiu)} on ${worst.model}${extra}. ${advice}`
+    );
   }
 }
 
@@ -402,13 +436,7 @@ function detectAndNotifyNudges(chats: ChatGroup[], config: CoachConfig): void {
   candidates.sort((a, b) => b.group.startTime - a.group.startTime);
   const top = candidates[0];
   lastNudgeMs = Date.now();
-  vscode.window
-    .showInformationMessage(`Token Coach: ${top.warning.message}`, 'Open Dashboard')
-    .then((choice) => {
-      if (choice === 'Open Dashboard') {
-        void showDashboard();
-      }
-    });
+  notifyAutoDismiss('info', `Token Coach: ${top.warning.message}`);
 }
 
 /** Debounced refresh, used by watchers that can fire in rapid bursts. */

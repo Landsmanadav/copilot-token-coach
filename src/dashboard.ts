@@ -885,6 +885,87 @@ function renderChat(
     </details>`;
 }
 
+// ---- Day grouping --------------------------------------------------------
+
+/** Day-section heading: "Today", "Yesterday", or a full local date. */
+function dayHeading(dayKey: string, ts: number): string {
+  const now = new Date();
+  const todayKey = dayKeyOf(now.getTime());
+  // A timestamp one millisecond before today's midnight lands in yesterday.
+  const yesterdayKey = dayKeyOf(startOfDay(now.getTime()) - 1);
+  if (dayKey === todayKey) {
+    return 'Today';
+  }
+  if (dayKey === yesterdayKey) {
+    return 'Yesterday';
+  }
+  return new Date(ts).toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Render the chat list grouped into collapsible day sections (newest first).
+ * Today's section is open by default so the panel opens on what's current; older
+ * days collapse to a one-line header you can click to expand. The open/closed
+ * choice is remembered across refreshes via openState (keyed `day:<YYYY-MM-DD>`),
+ * exactly like chats and messages.
+ */
+function renderChatsByDay(
+  chats: ChatGroup[],
+  config: CoachConfig,
+  openState: Map<string, boolean>,
+  maxChatCost: number
+): string {
+  // Chats arrive newest-first, so a single pass keeps each day contiguous and in
+  // order. Group by the local day of each chat's last activity.
+  interface DayBucket {
+    key: string;
+    ts: number;
+    chats: ChatGroup[];
+    cost: number;
+  }
+  const days: DayBucket[] = [];
+  for (const chat of chats) {
+    const key = dayKeyOf(chat.lastTime);
+    let bucket = days.length ? days[days.length - 1] : undefined;
+    if (!bucket || bucket.key !== key) {
+      bucket = { key, ts: startOfDay(chat.lastTime), chats: [], cost: 0 };
+      days.push(bucket);
+    }
+    bucket.chats.push(chat);
+    bucket.cost += chat.totalCostNanoAiu;
+  }
+
+  const todayKey = dayKeyOf(new Date().getTime());
+  return days
+    .map((d) => {
+      const id = `day:${d.key}`;
+      const isToday = d.key === todayKey;
+      const isOpen = openState.has(id) ? openState.get(id)! : isToday;
+      const n = d.chats.length;
+      const usd =
+        config.usdPerAiu > 0
+          ? ` <span class="day-usd">${escapeHtml(formatUsd(d.cost, config.usdPerAiu))}</span>`
+          : '';
+      return `
+        <details class="day" data-id="${escapeHtml(id)}"${isOpen ? ' open' : ''}>
+          <summary>
+            <span class="day-title">${escapeHtml(dayHeading(d.key, d.ts))}</span>
+            <span class="day-count muted">${n} chat${n === 1 ? '' : 's'}</span>
+            <span class="day-cost">${escapeHtml(formatCost(d.cost))}${usd}</span>
+          </summary>
+          <div class="day-body">
+            ${d.chats.map((c) => renderChat(c, config, openState, maxChatCost)).join('')}
+          </div>
+        </details>`;
+    })
+    .join('');
+}
+
 /**
  * Onboarding empty state. Two flavours:
  *   • logging OFF → a one-click "Enable logging" button (the extension writes the
@@ -1659,11 +1740,11 @@ function renderHtml(
             ? `<p class="muted">Showing the ${MAX_CHATS} most recent of ${chats.length.toLocaleString()} chats.</p>`
             : ''
         }
-        <div class="hint muted">Grouped by chat. Click a chat to see its messages; click a message for cost drivers (tools &amp; context) and a turn-by-turn breakdown.</div>
+        <div class="hint muted">Grouped by day, then by chat — today is open, older days are collapsed (click a day to expand it). Click a chat to see its messages; click a message for cost drivers (tools &amp; context) and a turn-by-turn breakdown.</div>
         <div class="chats">
           ${(() => {
             const maxChatCost = Math.max(...shown.map((c) => c.totalCostNanoAiu), 1);
-            return shown.map((c) => renderChat(c, config, openState, maxChatCost)).join('');
+            return renderChatsByDay(shown, config, openState, maxChatCost);
           })()}
         </div>`;
 
@@ -1815,7 +1896,28 @@ function renderHtml(
     .hist-date { font-size: 0.75em; }
 
     /* Chat (session) groups */
-    .chats { display: flex; flex-direction: column; gap: 14px; }
+    .chats { display: flex; flex-direction: column; gap: 18px; }
+
+    /* Day sections: a collapsible header per calendar day (today open by default) */
+    .day { border: 0; }
+    .day > summary {
+      cursor: pointer; list-style: none; user-select: none;
+      display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+      padding: 6px 2px 8px; margin: 0;
+      border-bottom: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+    }
+    .day > summary::-webkit-details-marker { display: none; }
+    .day > summary::before {
+      content: '▸'; display: inline-block; flex: 0 0 auto;
+      color: var(--vscode-descriptionForeground); transition: transform 0.12s ease;
+    }
+    .day[open] > summary::before { transform: rotate(90deg); }
+    .day-title { font-size: 1.08em; font-weight: 700; }
+    .day-count { font-size: 0.85em; font-weight: 400; }
+    .day-cost { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .day-usd { font-weight: 600; color: var(--vscode-charts-green, #4ec9b0); }
+    .day-body { display: flex; flex-direction: column; gap: 14px; padding: 12px 0 4px; }
+
     .chat {
       border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
       border-radius: 8px;

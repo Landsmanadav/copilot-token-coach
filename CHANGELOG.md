@@ -4,6 +4,32 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-06-29
+
+A focused usability pass: the chat list is easier to scan, the settings are far
+shorter, and notifications get out of your way on their own.
+
+### Added
+- **Chats grouped by day.** The chat list is now split into collapsible day
+  sections — **Today** is expanded by default, older days (Yesterday, then dated
+  headers) collapse to a one-line summary you click to open. Each day header
+  shows its chat count and total cost. Open/closed state is remembered across
+  refreshes, like chats and messages.
+- **Self-dismissing notifications.** Cost alerts and efficiency tips now close
+  themselves after a few seconds so they never pile up, controlled by the new
+  **`tokenCoach.notificationAutoDismissSeconds`** setting (default `3`; set `0`
+  to keep classic sticky notifications with an *Open Dashboard* button).
+
+### Changed
+- **Settings slimmed down to the two that matter.** The top-level *Token Coach*
+  section now holds just the **alert threshold** (`costWarnThreshold`) and the
+  **monthly budget** (`planMonthlyUsd`), each rewritten with a fuller
+  explanation. Everything else — token/cache warning tuning, price weights,
+  notification toggles, poll interval — moved under **Token Coach: Advanced**.
+- **Alert threshold raised from 3 to 25 credits.** The default no longer fires a
+  notification until a single request crosses ~$0.25, so only genuinely
+  expensive requests interrupt you. Existing custom values are untouched.
+
 ## [2.0.0] - 2026-06-19
 
 A big visual release: the dashboard is rebuilt around real charts, a brand-new

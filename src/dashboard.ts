@@ -243,7 +243,8 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
   let coverageEnd = 0;
   const activeDays = new Set<string>();
 
-  // Data is already month-scoped upstream; the remaining time split is "today".
+  // Totals here are all-time (everything logged on disk). We also split out
+  // "today" for the headline card.
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 
@@ -310,12 +311,12 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
 }
 
 // ---------------------------------------------------------------------------
-// Daily spend series — drives the "spend over the month" column chart and the
-// "Used" card sparkline. Built straight from the (month-scoped) requests on
-// disk: each request's REAL logged cost, split into fresh / cached / output via
-// the same splitCost() the rest of the dashboard uses (the three parts sum back
-// to the exact logged total). Idle days are filled with zeros so the chart shows
-// the true day-to-day cadence, not a compressed list of active days only.
+// Daily spend series — drives the "spend over time" column chart. Built straight
+// from every logged request on disk: each request's REAL logged cost, split into
+// fresh / cached / output via the same splitCost() the rest of the dashboard uses
+// (the three parts sum back to the exact logged total). Idle days are filled with
+// zeros so the chart shows the true day-to-day cadence, not a compressed list of
+// active days only.
 // ---------------------------------------------------------------------------
 
 interface DaySpend {
@@ -340,9 +341,11 @@ function dayKeyOf(ts: number): string {
 }
 
 /**
- * Bucket the month's requests into per-day spend, split fresh/cached/output.
- * Fills every calendar day from the 1st of the month through today so idle days
- * render as gaps (honest cadence), even if logging only started mid-month.
+ * Bucket all logged requests into per-day spend, split fresh/cached/output.
+ * Fills every calendar day across the logged window (first logged day → today)
+ * so idle days render as gaps (honest cadence). The axis is capped to the last
+ * ~92 days so a long history stays readable — never starting before the first
+ * logged day.
  */
 function buildDailySpend(data: ParsedData, config: CoachConfig): DaySpend[] {
   const byDay = new Map<string, DaySpend>();
@@ -370,11 +373,15 @@ function buildDailySpend(data: ParsedData, config: CoachConfig): DaySpend[] {
   if (byDay.size === 0) {
     return [];
   }
-  // Fill the month-to-date axis: 1st of the current month → today (local).
+  // Fill a continuous daily axis (first logged day → today) so idle days render
+  // as gaps. Cap to the last ~92 days so a long history doesn't produce an
+  // unreadably wide chart; never start before the first logged day.
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const firstTs = Math.min(...[...byDay.values()].map((d) => d.ts));
+  const earliestAllowed = startOfDay(now.getTime() - 91 * 86_400_000);
+  const startTs = Math.max(startOfDay(firstTs), earliestAllowed);
   const days: DaySpend[] = [];
-  for (let d = new Date(monthStart); d <= now; d.setDate(d.getDate() + 1)) {
+  for (let d = new Date(startTs); d <= now; d.setDate(d.getDate() + 1)) {
     const ts = startOfDay(d.getTime());
     const key = dayKeyOf(ts);
     days.push(byDay.get(key) ?? { dayKey: key, ts, fresh: 0, cached: 0, output: 0, total: 0 });
@@ -862,7 +869,7 @@ function renderChat(
         </div>
         <div class="chat-bar tip" data-tip="${escapeHtml(
           `This chat is ${formatCost(chat.totalCostNanoAiu)}${
-            maxChatCost > 0 ? ` — ${Math.round((chat.totalCostNanoAiu / maxChatCost) * 100)}% of your priciest chat this month` : ''
+            maxChatCost > 0 ? ` — ${Math.round((chat.totalCostNanoAiu / maxChatCost) * 100)}% of your priciest logged chat` : ''
           }.`
         )}"><span class="chat-bar-fill" style="width:${
           maxChatCost > 0 ? Math.round((chat.totalCostNanoAiu / maxChatCost) * 100) : 0
@@ -909,10 +916,11 @@ function dayHeading(dayKey: string, ts: number): string {
 
 /**
  * Render the chat list grouped into collapsible day sections (newest first).
- * Today's section is open by default so the panel opens on what's current; older
- * days collapse to a one-line header you can click to expand. The open/closed
- * choice is remembered across refreshes via openState (keyed `day:<YYYY-MM-DD>`),
- * exactly like chats and messages.
+ * Today's section is open by default so the panel opens on what's current; when
+ * the group has no "today" (e.g. a past month), its newest day opens instead, so
+ * expanding a month always reveals its latest activity. Older days collapse to a
+ * one-line header you can click to expand. The open/closed choice is remembered
+ * across refreshes via openState (keyed `day:<YYYY-MM-DD>`), like chats/messages.
  */
 function renderChatsByDay(
   chats: ChatGroup[],
@@ -941,11 +949,14 @@ function renderChatsByDay(
   }
 
   const todayKey = dayKeyOf(new Date().getTime());
+  // Open today by default; if this group has no today (a past month), open its
+  // newest day instead. `days` is newest-first, so days[0] is that fallback.
+  const anyToday = days.some((d) => d.key === todayKey);
+  const defaultOpenKey = anyToday ? todayKey : days[0]?.key;
   return days
     .map((d) => {
       const id = `day:${d.key}`;
-      const isToday = d.key === todayKey;
-      const isOpen = openState.has(id) ? openState.get(id)! : isToday;
+      const isOpen = openState.has(id) ? openState.get(id)! : d.key === defaultOpenKey;
       const n = d.chats.length;
       const usd =
         config.usdPerAiu > 0
@@ -960,6 +971,87 @@ function renderChatsByDay(
           </summary>
           <div class="day-body">
             ${d.chats.map((c) => renderChat(c, config, openState, maxChatCost)).join('')}
+          </div>
+        </details>`;
+    })
+    .join('');
+}
+
+/** Local `YYYY-MM` month key for a timestamp. */
+function monthKeyOf(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+}
+
+/** Month-section heading: "This month" for the current month, else "July 2026". */
+function monthHeading(monthKey: string, ts: number): string {
+  const thisMonthKey = monthKeyOf(new Date().getTime());
+  if (monthKey === thisMonthKey) {
+    return 'This month';
+  }
+  return new Date(ts).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+}
+
+/**
+ * Render the chat list grouped into collapsible MONTH sections (newest first),
+ * each of which groups its chats by day inside (Month → Day → Chat). The current
+ * month is open by default; past months collapse to a one-line header you can
+ * click to expand — exactly like the day grouping, one level up. Nothing is ever
+ * dropped at a month boundary, so older months stay one click away. The
+ * open/closed choice is remembered across refreshes via openState (keyed
+ * `month:<YYYY-MM>`), like chats, messages and days.
+ */
+function renderChatsByMonth(
+  chats: ChatGroup[],
+  config: CoachConfig,
+  openState: Map<string, boolean>,
+  maxChatCost: number
+): string {
+  // Chats arrive newest-first, so a single pass keeps each month contiguous and
+  // in order. Group by the local month of each chat's last activity.
+  interface MonthBucket {
+    key: string;
+    ts: number;
+    chats: ChatGroup[];
+    cost: number;
+  }
+  const months: MonthBucket[] = [];
+  for (const chat of chats) {
+    const key = monthKeyOf(chat.lastTime);
+    let bucket = months.length ? months[months.length - 1] : undefined;
+    if (!bucket || bucket.key !== key) {
+      bucket = { key, ts: chat.lastTime, chats: [], cost: 0 };
+      months.push(bucket);
+    }
+    bucket.chats.push(chat);
+    bucket.cost += chat.totalCostNanoAiu;
+  }
+
+  // Default-open the current month; if it has no logs yet (e.g. early on the 1st),
+  // fall back to the newest month that does, so the panel never opens fully
+  // collapsed. `months` is newest-first, so months[0] is that newest bucket.
+  const thisMonthKey = monthKeyOf(new Date().getTime());
+  const defaultOpenKey = months.some((m) => m.key === thisMonthKey)
+    ? thisMonthKey
+    : months[0]?.key;
+  return months
+    .map((m) => {
+      const id = `month:${m.key}`;
+      const isOpen = openState.has(id) ? openState.get(id)! : m.key === defaultOpenKey;
+      const n = m.chats.length;
+      const usd =
+        config.usdPerAiu > 0
+          ? ` <span class="month-usd">${escapeHtml(formatUsd(m.cost, config.usdPerAiu))}</span>`
+          : '';
+      return `
+        <details class="month" data-id="${escapeHtml(id)}"${isOpen ? ' open' : ''}>
+          <summary>
+            <span class="month-title">${escapeHtml(monthHeading(m.key, m.ts))}</span>
+            <span class="month-count muted">${n} chat${n === 1 ? '' : 's'}</span>
+            <span class="month-cost">${escapeHtml(formatCost(m.cost))}${usd}</span>
+          </summary>
+          <div class="month-body">
+            ${renderChatsByDay(m.chats, config, openState, maxChatCost)}
           </div>
         </details>`;
     })
@@ -995,10 +1087,9 @@ function renderEmptyState(loggingEnabled: boolean): string {
   return `
     <div class="empty">
       <div class="empty-icon">✅</div>
-      <h2>Logging is on — no usage logged this month yet</h2>
-      <p>Token Coach shows the current calendar month only — it starts fresh on the 1st, like GitHub’s
-        credit meter. Use Copilot Chat a few times, then refresh to see your spend, cache reuse, and
-        where the tokens go.</p>
+      <h2>Logging is on — no usage logged yet</h2>
+      <p>Use Copilot Chat a few times, then refresh to see your spend, cache reuse, and where the tokens go.
+        Token Coach keeps your whole logged history, grouped by month.</p>
       <p class="empty-actions">
         <button id="emptyRefresh" class="primary">↻ Refresh</button>
         <button id="emptySettings" class="ghost">⚙ Settings</button>
@@ -1029,87 +1120,39 @@ function formatCoverageRange(summary: Summary): string {
   return start === end ? start : `${start} → ${end}`;
 }
 
-/** "Jun 1 → Jun 10, 2026" — the 1st of the current month through today. */
-function formatMonthToDateRange(): string {
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const start = formatDateShort(monthStart);
-  const end = formatDateShort(now.getTime());
-  return start === end ? start : `${start} → ${end}`;
-}
-
 /**
- * "Used" card — credits used this calendar month. The data is month-scoped
- * upstream (extension.ts filters to the current month), so this starts fresh
- * on the 1st of each month, like GitHub's credit meter. Still only the
- * sessions Copilot debug-logged on this machine.
+ * "Today" card — the headline: what's been spent since local midnight, with the
+ * average daily pace across all logged days for context. This is deliberately a
+ * *daily* figure; Token Coach no longer shows a monthly total (Copilot's own
+ * status menu already does, and local logs only capture a fraction of it).
  */
-function renderUsedCard(summary: Summary, config: CoachConfig, daily: DaySpend[]): string {
-  const showUsd = config.usdPerAiu > 0;
-  const monthRange = formatMonthToDateRange();
-  const fmtNano = (nano: number) => (showUsd ? formatUsd(nano, config.usdPerAiu) : formatCost(nano));
-  // Daily spend trend under the headline — the "is this a spike or steady?" read.
-  // Interactive: hover anywhere to read off that day's spend.
-  const maxDay = Math.max(...daily.map((d) => d.total / 1e9), 0);
-  const spark =
-    daily.length >= 2
-      ? `<div class="card-spark">${lineChart(
-          daily.map((d) => ({
-            label: formatDateShort(d.ts),
-            value: d.total / 1e9,
-            tip: `${formatDateShort(d.ts)} · ${fmtNano(d.total)}`,
-          })),
-          { height: 54, min: 0, max: maxDay || 1, lineColor: CHART.blue, bare: true }
-        )}</div>`
-      : '';
-  const loggedRange = formatCoverageRange(summary);
-  const value = showUsd
-    ? formatUsd(summary.totalCostNanoAiu, config.usdPerAiu)
-    : formatCost(summary.totalCostNanoAiu);
-  const help =
-    `Credits used from the 1st of the month through today (${monthRange}), from the Copilot debug ` +
-    `logs on this machine${loggedRange ? ` — logs were written on ${loggedRange}` : ''}. Resets ` +
-    `automatically on the 1st of each month, like GitHub's monthly credit meter. The logs are a ` +
-    `partial record — sessions on days the log wasn't written, on other machines, or in ask/inline ` +
-    `(non-agent) modes aren't here — so this reads lower than your account-wide total. ` +
-    `1 credit = 1 AIU = $0.01. This figure comes only from the local debug logs; for your real ` +
-    `account total, see Copilot's own credit meter (the Copilot status menu on github.com).`;
-  return `
-    <div class="card card-budget card-wide card-hero">
-      <div class="card-label">Used · this month <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
-      <div class="card-value">${escapeHtml(value)}</div>
-      <div class="card-sub muted">${escapeHtml(formatCredits(summary.totalCostNanoAiu))} · ${escapeHtml(monthRange)}</div>
-      ${spark}
-    </div>`;
-}
-
-/** "Today" card — what's been spent since local midnight, plus the month's daily pace. */
 function renderTodayCard(summary: Summary, config: CoachConfig): string {
   const showUsd = config.usdPerAiu > 0;
   const value = showUsd
     ? formatUsd(summary.todayCostNanoAiu, config.usdPerAiu)
     : formatCost(summary.todayCostNanoAiu);
-  // Honest arithmetic only: month-to-date total ÷ days elapsed this month.
-  const daysElapsed = new Date().getDate();
-  const avgNano = summary.totalCostNanoAiu / Math.max(1, daysElapsed);
+  // Honest arithmetic only: total logged ÷ distinct days that actually have logs.
+  const activeDays = Math.max(1, summary.coverageActiveDays);
+  const avgNano = summary.totalCostNanoAiu / activeDays;
   const avg = showUsd ? formatUsd(avgNano, config.usdPerAiu) : formatCost(avgNano);
   const help =
-    `Credits used since local midnight. The average is simply this month's logged total divided by ` +
-    `the ${daysElapsed} day${daysElapsed === 1 ? '' : 's'} elapsed so far — no projection, just pace.`;
+    `Credits used since local midnight, from this machine's Copilot debug logs. The average is simply ` +
+    `your total logged spend divided by the ${activeDays} day${activeDays === 1 ? '' : 's'} that actually ` +
+    `have logs — no projection, just pace.`;
   return `
-    <div class="card">
+    <div class="card card-hero">
       <div class="card-label">Today <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
       <div class="card-value">${escapeHtml(value)}</div>
-      <div class="card-sub muted">avg ${escapeHtml(avg)}/day this month</div>
+      <div class="card-sub muted">avg ${escapeHtml(avg)}/active day</div>
     </div>`;
 }
 
 /**
- * Banner stating the window the data covers — the current calendar month only
- * (the data is month-scoped upstream, so the whole dashboard resets on the 1st).
- * Token Coach only reads sessions Copilot wrote to its debug logs on this
- * machine, so usage outside the window (other days/machines, ask/inline modes)
- * isn't included, which is why the total can read lower than GitHub's meter.
+ * Banner stating the window the data covers — the full logged history on this
+ * machine (nothing resets or is dropped at a month boundary; older months just
+ * collapse in the list below). Token Coach only reads sessions Copilot wrote to
+ * its debug logs here, so usage elsewhere (other machines, ask/inline modes)
+ * isn't included, which is why the totals read lower than GitHub's credit meter.
  */
 function renderCoverage(summary: Summary): string {
   const range = formatCoverageRange(summary);
@@ -1118,38 +1161,20 @@ function renderCoverage(summary: Summary): string {
   }
   const days = summary.coverageActiveDays;
   const sessions = summary.chatCount;
-  const monthRange = formatMonthToDateRange();
-
-  // If the first logged day falls after the 1st of the month, there's a blind
-  // spot at the start of the month — debug logging was off, or those early logs
-  // rotated away. That gap is the usual reason this total reads below Copilot's
-  // own credit meter, so call it out in plain sight (not just the tooltip).
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const hasStartGap =
-    summary.coverageStartTs > 0 && startOfDay(summary.coverageStartTs) > monthStart;
-  const gapNote = hasStartGap
-    ? ` Logged usage here only starts <b>${escapeHtml(formatDateShort(summary.coverageStartTs))}</b>, so anything
-        earlier this month isn't counted below — for your full account total see Copilot's own credit meter
-        (the Copilot status menu on github.com).`
-    : '';
 
   const help =
-    `Token Coach shows the current calendar month only — everything resets automatically on the 1st, ` +
-    `like GitHub's credit meter. It also only sees sessions Copilot wrote to its debug logs on this ` +
-    `machine: within ${monthRange}, logs exist for ${range} (${days} day${days === 1 ? '' : 's'} with logs, ${sessions} session${sessions === 1 ? '' : 's'}). ` +
-    (hasStartGap
-      ? `Because logging only began on ${formatDateShort(summary.coverageStartTs)}, usage earlier this month is missing entirely. `
-      : '') +
-    `Sessions on days the log wasn't written, on other machines, or in ask/inline modes aren't captured, ` +
-    `so the total reads lower than your account-wide monthly meter. Everything here is read straight from ` +
-    `the local debug logs — for your real account total, see Copilot's own credit meter on github.com.`;
+    `Token Coach reads GitHub Copilot's local debug logs on this machine and keeps your whole logged ` +
+    `history — nothing resets or is dropped when a new month starts (older months just collapse in the ` +
+    `list below). Logs exist for ${range} (${days} day${days === 1 ? '' : 's'} with logs, ${sessions} ` +
+    `session${sessions === 1 ? '' : 's'}). Sessions on days the log wasn't written, on other machines, or ` +
+    `in ask/inline (non-agent) modes aren't captured, so these totals read lower than your account-wide ` +
+    `credit meter. For your real monthly credit total, see Copilot's own status menu.`;
   return `
     <div class="coverage">
       <span class="coverage-icon">📅</span>
-      <span>The figures below cover <b>${escapeHtml(monthRange)}</b> — this month so far
-        <span class="muted">(logs on ${days} day${days === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'})</span> —
-        and reset automatically when a new month starts.${gapNote}</span>
+      <span>Everything logged on this machine — <b>${escapeHtml(range)}</b>
+        <span class="muted">(logs on ${days} day${days === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'})</span>.
+        Grouped by month below; nothing is dropped when a new month starts.</span>
       <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span>
     </div>`;
 }
@@ -1255,9 +1280,9 @@ function renderHistory(history: DailySnapshot[]): string {
     label: h.date.slice(5),
     value: h.score,
     dotColor: scoreColor(h.score),
-    tip: `${h.date} · grade ${h.grade} · ${h.score}/100 · month ${formatCost(
+    tip: `${h.date} · grade ${h.grade} · ${h.score}/100 · spent ${formatCost(
       h.monthCostNanoAiu
-    )} · ${formatTokensCompact(h.totalTokens)} tok`,
+    )} that day · ${formatTokensCompact(h.totalTokens)} tok`,
   }));
   const lastColor = scoreColor(recent[recent.length - 1].score);
   const chart = lineChart(points, {
@@ -1410,9 +1435,10 @@ function renderTokenBreakdown(summary: Summary, config: CoachConfig): string {
 }
 
 /**
- * "Spend over the month" — the headline column chart: daily credits, each day's
- * column split into fresh / cached / output. The single most useful view a cost
- * dashboard can open with (are you spiking or steady?). Idle days show as gaps.
+ * "Spend over time" — the headline column chart: daily credits, each day's
+ * column split into fresh / cached / output, across the logged window (up to the
+ * last ~92 days). The single most useful view a cost dashboard can open with
+ * (are you spiking or steady?). Idle days show as gaps.
  */
 function renderSpendChart(daily: DaySpend[], config: CoachConfig): string {
   const active = daily.filter((d) => d.total > 0);
@@ -1450,18 +1476,18 @@ function renderSpendChart(daily: DaySpend[], config: CoachConfig): string {
   return `
     <div class="panel panel-chart">
       <div class="panel-head">
-        <span class="panel-title">💵 Spend over the month</span>
+        <span class="panel-title">💵 Spend over time</span>
         <span class="panel-legend">${legend}</span>
       </div>
       <div class="chart-body">${columns(bars, series, { height: 150 })}</div>
       <div class="chart-axis muted">
         <span>${escapeHtml(formatDateShort(first.ts))}</span>
         <span class="chart-axis-mid tip" data-tip="${escapeHtml(
-          `Highest-spend day this month: ${formatDateShort(peak.ts)} at ${fmt(peak.total)}.`
+          `Highest-spend logged day: ${formatDateShort(peak.ts)} at ${fmt(peak.total)}.`
         )}">▲ peak ${escapeHtml(fmt(peak.total))}</span>
         <span>${escapeHtml(formatDateShort(last.ts))}</span>
       </div>
-      <div class="panel-foot muted">${escapeHtml(fmt(total))} total this month · ${active.length} active day${
+      <div class="panel-foot muted">${escapeHtml(fmt(total))} total logged · ${active.length} active day${
         active.length === 1 ? '' : 's'
       }</div>
     </div>`;
@@ -1619,7 +1645,7 @@ function renderUnusedToolTrend(report: UnusedToolReport): string {
       <p class="muted small unused-trend-note">
         Every defined tool rides along in the cached prefix and costs cache-read tokens on each request.
         If one of these comes from an MCP server or tool set you don't use, disabling it shrinks every request from here on.
-        This is based only on your logged chats this month — if you do use one again, it drops off this list automatically.
+        This is based only on your logged chats — if you do use one again, it drops off this list automatically.
       </p>
     </div>`;
 }
@@ -1644,8 +1670,7 @@ function renderSummary(
   summary: Summary,
   efficiency: EfficiencyScore,
   inventory: ToolInventory,
-  config: CoachConfig,
-  daily: DaySpend[]
+  config: CoachConfig
 ): string {
   const priciest = summary.priciestMessage;
   const priciestText = priciest
@@ -1656,11 +1681,12 @@ function renderSummary(
   // Cache ring: higher reuse is better, so it warms green as it climbs.
   const cacheRate = summary.aggregateCacheHitRate;
   const cacheCol = cacheRate >= 0.6 ? CHART.green : cacheRate >= 0.3 ? CHART.yellow : CHART.red;
-  // Order: money first (month, today), then health (efficiency, cache),
-  // then volume (activity), then waste signals (tools, priciest, flagged).
+  // Order: today's spend first, then health (efficiency, cache), then volume
+  // (activity), then waste signals (tools, priciest, flagged). There is no
+  // monthly-total card on purpose — Copilot's own menu already shows that, and
+  // local logs only ever capture a fraction of it, so mirroring it misleads.
   return `
     <div class="cards kpi-grid">
-      ${renderUsedCard(summary, config, daily)}
       ${renderTodayCard(summary, config)}
       ${renderEfficiencyCard(efficiency)}
       <div class="card">
@@ -1726,7 +1752,7 @@ function renderHtml(
       : `
         ${renderUnusedToolTrend(unusedTrend)}
         ${renderCoverage(summary)}
-        ${renderSummary(summary, efficiency, inventory, config, daily)}
+        ${renderSummary(summary, efficiency, inventory, config)}
         <div class="chart-row">
           ${renderSpendChart(daily, config)}
           ${renderModelBars(data, config)}
@@ -1740,11 +1766,11 @@ function renderHtml(
             ? `<p class="muted">Showing the ${MAX_CHATS} most recent of ${chats.length.toLocaleString()} chats.</p>`
             : ''
         }
-        <div class="hint muted">Grouped by day, then by chat — today is open, older days are collapsed (click a day to expand it). Click a chat to see its messages; click a message for cost drivers (tools &amp; context) and a turn-by-turn breakdown.</div>
+        <div class="hint muted">Grouped by month, then day, then chat — this month is open, older months are collapsed (click a month to expand it). Nothing is dropped when a new month starts. Click a chat to see its messages; click a message for cost drivers (tools &amp; context) and a turn-by-turn breakdown.</div>
         <div class="chats">
           ${(() => {
             const maxChatCost = Math.max(...shown.map((c) => c.totalCostNanoAiu), 1);
-            return renderChatsByDay(shown, config, openState, maxChatCost);
+            return renderChatsByMonth(shown, config, openState, maxChatCost);
           })()}
         </div>`;
 
@@ -1897,6 +1923,27 @@ function renderHtml(
 
     /* Chat (session) groups */
     .chats { display: flex; flex-direction: column; gap: 18px; }
+
+    /* Month sections: the OUTERMOST grouping (this month open by default). Nothing
+       is dropped at a month boundary — older months collapse to a header. */
+    .month { border: 0; }
+    .month > summary {
+      cursor: pointer; list-style: none; user-select: none;
+      display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+      padding: 10px 4px; margin: 0;
+      border-bottom: 2px solid var(--vscode-widget-border, rgba(127,127,127,0.45));
+    }
+    .month > summary::-webkit-details-marker { display: none; }
+    .month > summary::before {
+      content: '▸'; display: inline-block; flex: 0 0 auto; font-size: 1.1em;
+      color: var(--vscode-descriptionForeground); transition: transform 0.12s ease;
+    }
+    .month[open] > summary::before { transform: rotate(90deg); }
+    .month-title { font-size: 1.22em; font-weight: 800; letter-spacing: 0.01em; }
+    .month-count { font-size: 0.85em; font-weight: 400; }
+    .month-cost { margin-left: auto; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .month-usd { font-weight: 600; color: var(--vscode-charts-green, #4ec9b0); }
+    .month-body { display: flex; flex-direction: column; gap: 18px; padding: 16px 0 4px 12px; }
 
     /* Day sections: a collapsible header per calendar day (today open by default) */
     .day { border: 0; }

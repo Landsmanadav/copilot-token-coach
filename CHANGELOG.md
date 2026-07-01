@@ -4,6 +4,41 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-07-01
+
+Stops competing with Copilot's own credit meter. The old "used this month" figure
+could only ever see the slice Copilot wrote to this machine's local debug logs, so
+it read far below GitHub's number and looked broken. Token Coach now leads with
+**today's** spend (a small, honest window) and keeps your whole history instead of
+wiping it every month.
+
+### Changed
+- **Status bar leads with "today", not "this month".** The headline is now the
+  credits used since local midnight — a figure that doesn't invite a mismatch with
+  Copilot's monthly meter. The tooltip shows today plus an all-time logged total,
+  and states plainly that this is only local chat/agent logs (so it reads lower
+  than your account meter — use Copilot's own status menu for the real total).
+- **History is kept across months.** Nothing is dropped when a new month starts.
+  The chat list is now grouped **month → day → chat**: the current month is
+  expanded, older months collapse to a one-line header you click to open. Opening
+  a past month reveals its most recent day.
+- **Dashboard totals are all-time.** The summary cards, "Spend over time" chart
+  (up to the last ~92 days), model spend and coverage banner now describe your
+  full logged history rather than a single calendar month.
+- **Status-bar tint follows efficiency only.** No plan/budget tint — Token Coach
+  doesn't track a monthly quota.
+
+### Removed
+- **The "Used · this month" card.** Copilot's own status menu already shows your
+  monthly credit total, and the local logs only ever capture a fraction of it, so
+  mirroring it was misleading. Removed in favour of the honest "Today" headline.
+
+### Fixed
+- **No more "enable logging" nudge once it's already on.** When there's nothing
+  logged yet, the status bar now checks whether Copilot debug logging is actually
+  on: if it is (e.g. a fresh setup, or a new month with rotated logs), it says
+  "no usage yet" instead of telling you to turn on a setting that's already on.
+
 ## [2.1.0] - 2026-06-29
 
 A focused usability pass: the chat list is easier to scan, the settings are far

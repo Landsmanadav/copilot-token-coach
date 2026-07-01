@@ -23,8 +23,8 @@ export interface DailySnapshot {
 }
 
 /** Build the full Markdown report string for the given data + history.
- *  The data is month-scoped upstream (extension.ts), so all totals are
- *  "this month" and the report starts fresh each calendar month. */
+ *  Covers all Copilot chat/agent usage logged on this machine — the whole logged
+ *  history, not a single calendar month (nothing resets at a month boundary). */
 export function buildMarkdownReport(
   data: ParsedData,
   config: CoachConfig,
@@ -36,10 +36,10 @@ export function buildMarkdownReport(
   const chats = groupByChat(data);
   const showUsd = config.usdPerAiu > 0;
 
-  let monthCost = 0;
+  let totalCost = 0;
   const byModel = new Map<string, { requests: number; tokens: number; cost: number }>();
   for (const r of data.requests) {
-    monthCost += r.costNanoAiu;
+    totalCost += r.costNanoAiu;
     const e = byModel.get(r.model) ?? { requests: 0, tokens: 0, cost: 0 };
     e.requests += 1;
     e.tokens += r.inputTokens + r.outputTokens;
@@ -50,9 +50,8 @@ export function buildMarkdownReport(
   const usd = (nano: number) => (showUsd ? ` (≈ ${formatUsd(nano, config.usdPerAiu)})` : '');
   const L: string[] = [];
 
-  const monthName = generatedAt.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-  L.push(`# Token Coach report — ${monthName}`);
-  L.push(`_Generated ${generatedAt.toLocaleString()} · covers the current calendar month only (resets on the 1st)_`);
+  L.push(`# Token Coach report`);
+  L.push(`_Generated ${generatedAt.toLocaleString()} · covers all Copilot chat/agent usage logged on this machine_`);
   L.push('');
 
   // Headline
@@ -63,12 +62,7 @@ export function buildMarkdownReport(
   if (eff.hasData) {
     L.push(`| **Efficiency** | ${eff.grade} · ${eff.score}/100 (cache ${eff.cacheScore}, clean ${eff.cleanScore}) |`);
   }
-  L.push(`| This month (logged) | ${formatCost(monthCost)}${usd(monthCost)} |`);
-  if (showUsd && config.planMonthlyUsd > 0) {
-    const mUsd = (monthCost / 1e9) * config.usdPerAiu;
-    const pct = Math.round((mUsd / config.planMonthlyUsd) * 100);
-    L.push(`| Of plan | ${formatUsd(monthCost, config.usdPerAiu)} of $${config.planMonthlyUsd.toFixed(0)} plan (${pct}%) |`);
-  }
+  L.push(`| Total logged (all time) | ${formatCost(totalCost)}${usd(totalCost)} |`);
   L.push(`| Requests | ${data.requests.length.toLocaleString()} |`);
   L.push(`| Chats | ${chats.length.toLocaleString()} |`);
   L.push('');
@@ -129,7 +123,7 @@ export function buildMarkdownReport(
   if (history.length) {
     L.push(`## Daily trend`);
     L.push('');
-    L.push(`| Date | Grade | Score | This-month cost | Total tokens |`);
+    L.push(`| Date | Grade | Score | Cost that day | Total tokens |`);
     L.push(`| --- | --- | --: | --: | --: |`);
     for (const h of history.slice(-30)) {
       L.push(

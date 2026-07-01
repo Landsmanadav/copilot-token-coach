@@ -48,11 +48,12 @@ only reads the JSONL logs Copilot already writes and visualizes them.
    slow tool. All thresholds are configurable.
 
 7. **Dollars / credits** — GitHub's June 2026 usage billing prices 1 AI credit =
-   $0.01, and 1 AIU ≈ 1 credit. We show USD next to AIU and a "plan budget ·
-   this month" gauge vs your plan's allowance (Business = $19). Rate and plan
-   price are configurable.
+   $0.01, and 1 AIU ≈ 1 credit. We show USD next to AIU. We do **not** reproduce
+   Copilot's monthly credit total — the local chat/agent logs only capture a
+   fraction of it, so the headline is today's spend and the dashboard keeps your
+   whole logged history (grouped by month). The AIU→USD rate is configurable.
 
-8. **Dashboard webview** — collapsible chat → message → turn tree, summary cards,
+8. **Dashboard webview** — collapsible month → day → chat → message → turn tree, summary cards,
    severity-highlighted rows, hover tooltips that explain every metric, a tab
    title showing live totals, and expand/scroll state that survives refreshes.
 

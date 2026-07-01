@@ -50,10 +50,14 @@ So this tool surfaces:
 - **Rules engine** — flags expensive requests, low cache hits on large inputs,
   oversized inputs, and huge-input/tiny-output requests. All thresholds are
   configurable.
-- **Status bar** — shows **this month's** cost and tokens (it resets on the 1st,
-  like GitHub's credit meter), with a distinct "new month, fresh start" state;
-  hover for a today / this-month breakdown, click to open the dashboard.
-- **Dashboard, grouped by chat → message** — the top level is each **chat**
+- **Status bar** — shows **today's** cost (credits used since local midnight) —
+  a small, honest window that doesn't try to mirror Copilot's own monthly credit
+  meter. Hover for a today / all-time-logged breakdown, click to open the
+  dashboard.
+- **Dashboard, grouped by month → day → chat → message** — the chat list is
+  grouped by month (this month expanded, older months collapse to a header you
+  click to open) and by day within each month; nothing is dropped when a new
+  month starts. The chat level is each **chat**
   (one Copilot conversation / debug session), labelled with its generated title
   (e.g. "Basic React app template") or the first message, and rolled up to its
   own cost, tokens, cache rate, message/request/tool counts and models.
@@ -81,9 +85,11 @@ So this tool surfaces:
   524k tok`), and expanded rows + scroll position are preserved across the live
   refreshes.
 - **Dollars** — AIU is converted to USD (1 AIU ≈ $0.01) and shown alongside the
-  raw cost (credits). The dashboard shows **what you've used** this month — no
-  quota or plan denominator; your monthly plan price only tints the status bar as
-  spend grows. See [Cost in dollars](#cost-in-dollars-credits).
+  raw cost (credits). Token Coach shows **what you've actually used** from the
+  local logs — no quota or plan denominator, and it deliberately doesn't try to
+  reproduce Copilot's monthly credit total (the local chat/agent logs only ever
+  capture a fraction of it; Copilot's own status menu is the source of truth for
+  that). See [Cost in dollars](#cost-in-dollars-credits).
 
   > Note on context sizes: Copilot only itemizes the in-prompt context blocks on
   > the first turn (attachments, workspace, memory, …); later turns log just the

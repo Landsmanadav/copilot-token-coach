@@ -61,13 +61,13 @@ let lastSnapshotMs = 0;
 const SNAPSHOT_MIN_GAP_MS = 10 * 60 * 1000;
 
 /** Ids of requests we've already seen, so we only notify about genuinely new ones.
- *  Rebuilt from the (month-scoped) data each pass, so it stays bounded. */
+ *  Rebuilt from the loaded data each pass, so it stays bounded. */
 let seenIds = new Set<string>();
 /** Suppress notifications during the very first load (historical data). */
 let primed = false;
 
 /** Message ids already seen, so inefficiency nudges fire once per new message.
- *  Rebuilt from the (month-scoped) data each pass, so it stays bounded. */
+ *  Rebuilt from the loaded data each pass, so it stays bounded. */
 let seenMessageIds = new Set<string>();
 /** Suppress inefficiency nudges on the first load (historical data). */
 let nudgePrimed = false;
@@ -116,36 +116,17 @@ function startOfTodayMs(): number {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 }
 
-function startOfMonthMs(): number {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-}
-
-/**
- * Keep only this calendar month's records. Every consumer (status bar,
- * dashboard, nudges, exported report) sees a month-scoped view, so on the 1st
- * of each month the extension starts fresh — matching GitHub's monthly credit
- * reset. Older logs stay on disk untouched; they're just not shown.
- */
-function filterToCurrentMonth(data: ParsedData): ParsedData {
-  const monthStart = startOfMonthMs();
-  return {
-    ...data,
-    requests: data.requests.filter((r) => r.timestamp >= monthStart),
-    toolCalls: data.toolCalls.filter((t) => t.timestamp >= monthStart),
-  };
-}
-
-function updateStatusBar(data: ParsedData, config: CoachConfig, hasOlderLogs = false): void {
+function updateStatusBar(data: ParsedData, config: CoachConfig): void {
   const records = data.requests;
   const todayStart = startOfTodayMs();
-  // Data is already month-scoped (filterToCurrentMonth), so the sum of all
-  // records IS this month's cost. The tooltip breaks it down by month / today.
-  // (Token counts are intentionally not shown.)
-  let monthCost = 0;
+  // The status bar leads with TODAY's spend — a small, honest window that doesn't
+  // invite a mismatch with Copilot's own monthly credit meter (which Copilot
+  // already shows in its status menu). The all-time logged total is in the
+  // tooltip. (Token counts are intentionally not shown.)
   let todayCost = 0;
+  let allTimeCost = 0;
   for (const r of records) {
-    monthCost += r.costNanoAiu;
+    allTimeCost += r.costNanoAiu;
     if (r.timestamp >= todayStart) {
       todayCost += r.costNanoAiu;
     }
@@ -154,28 +135,23 @@ function updateStatusBar(data: ParsedData, config: CoachConfig, hasOlderLogs = f
   const showUsd = config.usdPerAiu > 0;
 
   if (records.length === 0) {
-    // Distinguish "fresh month, nothing used yet" (older logs exist but are
-    // outside the current month) from "logging not set up at all".
-    if (hasOlderLogs) {
-      statusBarItem.text = `$(graph) ${showUsd ? formatUsd(0, config.usdPerAiu) : formatCost(0)} used`;
-      statusBarItem.backgroundColor = undefined;
-      const md = new vscode.MarkdownString(
-        '**$(graph) Token Coach** — new month, fresh start.\n\n' +
-          'No Copilot usage logged this month yet. The counter resets on the 1st, like GitHub\'s credit meter.\n\n' +
-          '[Open dashboard](command:tokenCoach.showDashboard)'
-      );
-      md.isTrusted = true;
-      md.supportThemeIcons = true;
-      statusBarItem.tooltip = md;
-      statusBarItem.show();
-      return;
-    }
-    statusBarItem.text = '$(graph) Token Coach: no logs';
+    // Two distinct empty states. Only nudge to enable logging when it's actually
+    // OFF — if the agent debug log is already on and there's simply nothing
+    // logged yet (e.g. a brand-new setup, or a fresh month with rotated logs),
+    // never re-prompt to turn it on; just say there's no usage yet.
+    const loggingOn = isLoggingEnabled();
+    statusBarItem.text = loggingOn
+      ? '$(graph) Token Coach: no usage yet'
+      : '$(graph) Token Coach: logging off';
     statusBarItem.backgroundColor = undefined;
     const md = new vscode.MarkdownString(
-      'No Copilot debug logs found yet.\n\n' +
-        'Enable `github.copilot.chat.agentDebugLog.enabled` and `…fileLogging.enabled`, then use Copilot Chat.\n\n' +
-        '[Open dashboard](command:tokenCoach.showDashboard)'
+      loggingOn
+        ? '**$(graph) Token Coach** — Copilot debug logging is on; no usage logged yet.\n\n' +
+            'Use Copilot Chat a few times and your usage will appear here.\n\n' +
+            '[Open dashboard](command:tokenCoach.showDashboard) · [Refresh](command:tokenCoach.refresh)'
+        : 'No Copilot debug logs found yet.\n\n' +
+            'Enable `github.copilot.chat.agentDebugLog.enabled` and `…fileLogging.enabled`, then use Copilot Chat.\n\n' +
+            '[Open dashboard](command:tokenCoach.showDashboard)'
     );
     md.isTrusted = true;
     md.supportThemeIcons = true;
@@ -187,40 +163,31 @@ function updateStatusBar(data: ParsedData, config: CoachConfig, hasOlderLogs = f
   // Single glanceable health signal, computed from the same coaching rules the
   // dashboard uses (cache reuse + waste warnings).
   const eff = computeEfficiency(data, config);
-  const monthUsd = (monthCost / 1e9) * config.usdPerAiu;
 
-  // Lead with "how much you've used this month" — the figure that maps to
-  // GitHub's monthly credit meter (it resets each month, just like GitHub).
-  // The all-time total and token breakdown move to the tooltip.
+  // Lead with "how much you've used today". Copilot's own menu already shows the
+  // monthly credit total, so Token Coach doesn't try to mirror (and undercount) it.
   const gradeTag = eff.hasData ? `${eff.grade} · ` : '';
-  const usedTag = showUsd ? `${formatUsd(monthCost, config.usdPerAiu)} used` : `${formatCost(monthCost)} used`;
+  const usedTag = showUsd ? `${formatUsd(todayCost, config.usdPerAiu)} today` : `${formatCost(todayCost)} today`;
   statusBarItem.text = `$(graph) ${gradeTag}${usedTag}`;
-  statusBarItem.backgroundColor = statusBarColor(eff, monthUsd, config);
+  statusBarItem.backgroundColor = statusBarColor(eff);
   statusBarItem.tooltip = buildStatusTooltip(
-    { eff, monthCost, todayCost, recordCount: records.length },
+    { eff, todayCost, allTimeCost, recordCount: records.length },
     config
   );
   statusBarItem.show();
 }
 
 /**
- * Tint the status bar to flag trouble at a glance. Status bar items only support
- * warning/error theme backgrounds, so we map: poor efficiency OR over budget →
- * red; mediocre efficiency OR nearing budget → yellow; otherwise the default.
+ * Tint the status bar to flag poor efficiency at a glance. Status bar items only
+ * support warning/error theme backgrounds, so we map: poor efficiency → red;
+ * mediocre → yellow; otherwise the default. (No plan/budget tint — Token Coach
+ * doesn't track a monthly quota; see the honest-logged-usage design note.)
  */
-function statusBarColor(
-  eff: EfficiencyScore,
-  monthUsd: number,
-  config: CoachConfig
-): vscode.ThemeColor | undefined {
-  const budgetTracked = config.usdPerAiu > 0 && config.planMonthlyUsd > 0;
-  const overBudget = budgetTracked && monthUsd > config.planMonthlyUsd;
-  const nearBudget = budgetTracked && monthUsd >= 0.8 * config.planMonthlyUsd;
-
-  if ((eff.hasData && eff.score < 50) || overBudget) {
+function statusBarColor(eff: EfficiencyScore): vscode.ThemeColor | undefined {
+  if (eff.hasData && eff.score < 50) {
     return new vscode.ThemeColor('statusBarItem.errorBackground');
   }
-  if ((eff.hasData && eff.score < 70) || nearBudget) {
+  if (eff.hasData && eff.score < 70) {
     return new vscode.ThemeColor('statusBarItem.warningBackground');
   }
   return undefined;
@@ -228,8 +195,8 @@ function statusBarColor(
 
 interface TooltipStats {
   eff: EfficiencyScore;
-  monthCost: number;
   todayCost: number;
+  allTimeCost: number;
   recordCount: number;
 }
 
@@ -252,14 +219,14 @@ function buildStatusTooltip(s: TooltipStats, config: CoachConfig): vscode.Markdo
   // "How much you used" by scope — just the credits you spent, no plan/quota.
   const line = (label: string, nano: number) =>
     `**${label}** ${formatCredits(nano)}${showUsd ? ` (${usd(nano)})` : ''}`;
-  const stats = [line('This month', s.monthCost), line('Today', s.todayCost)];
+  const stats = [line('Today', s.todayCost), line('All-time logged', s.allTimeCost)];
   // Two trailing spaces = a soft line break, so the stats stack tightly.
   blocks.push(stats.join('  \n'));
 
   blocks.push(
-    `${s.recordCount.toLocaleString()} requests logged this month — resets on the 1st, like GitHub's meter. ` +
-      `This is only what Copilot wrote to this machine's local debug logs, so it's a partial record ` +
-      `(other machines, and ask/inline modes, aren't here) and reads lower than your full account total.`
+    `${s.recordCount.toLocaleString()} requests logged on this machine. This is only the Copilot ` +
+      `chat/agent sessions written to local debug logs (other machines and ask/inline modes aren't here), ` +
+      `so it reads lower than your GitHub account meter. For your monthly credit total, use Copilot's own status menu.`
   );
   blocks.push(
     `[Open dashboard](command:tokenCoach.showDashboard) · ` +
@@ -285,11 +252,9 @@ async function refresh(): Promise<void> {
     console.error('[Token Coach] Failed to load logs:', err);
     data = { requests: [], toolCalls: [], titles: {} };
   }
-  // Month scope: everything shown resets automatically when a new month starts.
-  const totalLogged = data.requests.length;
-  data = filterToCurrentMonth(data);
-
-  updateStatusBar(data, config, totalLogged > data.requests.length);
+  // All logged history is kept — nothing is wiped at a month boundary. The
+  // dashboard groups it by month; the status bar shows today.
+  updateStatusBar(data, config);
 
   if (DashboardPanel.current) {
     DashboardPanel.current.update(data, config, getHistory(), isLoggingEnabled());
@@ -358,8 +323,8 @@ function detectAndNotifyNew(records: LlmRequestRecord[], config: CoachConfig): v
       newExpensive.push(r);
     }
   }
-  // Replace rather than accumulate: ids that fell out of the month-scoped data
-  // can never reappear, so this keeps the set bounded across months.
+  // Replace rather than accumulate: rebuild from the freshly loaded data each
+  // pass so the set stays bounded and never grows without limit.
   seenIds = current;
 
   if (!primed) {
@@ -453,8 +418,7 @@ function scheduleRefresh(): void {
 
 async function showDashboard(): Promise<void> {
   const config = getCoachConfig();
-  const raw = await loadAll(getOverridePath(), workspaceStorageBase);
-  const data = filterToCurrentMonth(raw);
+  const data = await loadAll(getOverridePath(), workspaceStorageBase);
   // Keep the seen-sets in sync so opening the dashboard doesn't re-trigger alerts.
   for (const r of data.requests) {
     seenIds.add(r.id);
@@ -468,7 +432,7 @@ async function showDashboard(): Promise<void> {
   nudgePrimed = true;
   await recordSnapshot(data, config);
   DashboardPanel.createOrShow(data, config, () => void refresh(), getHistory(), isLoggingEnabled());
-  updateStatusBar(data, config, raw.requests.length > data.requests.length);
+  updateStatusBar(data, config);
 }
 
 /**
@@ -530,20 +494,26 @@ async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<vo
   }
   lastSnapshotMs = now;
 
-  // Data is month-scoped, so the sum of all records is this month's cost.
-  let monthCost = 0;
+  // A snapshot is one calendar day, so its cost is what was logged *that day*
+  // (since local midnight) — re-written as the day progresses. This makes the
+  // trend a per-day spend line, not a monotonic all-time total. Tokens stay
+  // all-time as trend context.
+  const todayStart = startOfTodayMs();
+  let dayCost = 0;
   let totalTokens = 0;
   for (const r of data.requests) {
-    monthCost += r.costNanoAiu;
     totalTokens += r.inputTokens + r.outputTokens;
+    if (r.timestamp >= todayStart) {
+      dayCost += r.costNanoAiu;
+    }
   }
   const eff = computeEfficiency(data, config);
   const snap: DailySnapshot = {
     date,
     score: eff.score,
     grade: eff.grade,
-    allCostNanoAiu: monthCost,
-    monthCostNanoAiu: monthCost,
+    allCostNanoAiu: dayCost,
+    monthCostNanoAiu: dayCost,
     totalTokens,
   };
 
@@ -561,9 +531,9 @@ async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<vo
 /** Build a Markdown report and let the user save it, then open it. */
 async function exportReport(): Promise<void> {
   const config = getCoachConfig();
-  const data = filterToCurrentMonth(await loadAll(getOverridePath(), workspaceStorageBase));
+  const data = await loadAll(getOverridePath(), workspaceStorageBase);
   if (data.requests.length === 0) {
-    vscode.window.showWarningMessage('Token Coach: no Copilot usage logged this month — nothing to export.');
+    vscode.window.showWarningMessage('Token Coach: no Copilot usage logged yet — nothing to export.');
     return;
   }
   const md = buildMarkdownReport(data, config, getHistory(), new Date());

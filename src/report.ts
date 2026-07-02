@@ -60,7 +60,11 @@ export function buildMarkdownReport(
   L.push(`| Metric | Value |`);
   L.push(`| --- | --- |`);
   if (eff.hasData) {
-    L.push(`| **Efficiency** | ${eff.grade} · ${eff.score}/100 (cache ${eff.cacheScore}, clean ${eff.cleanScore}) |`);
+    const cacheBit = eff.hasCacheData ? `warm cache ${eff.cacheScore}` : 'warm cache n/a';
+    L.push(`| **Efficiency** | ${eff.grade} · ${eff.score}/100 (${cacheBit}, clean ${eff.cleanScore}) |`);
+    if (eff.topDrag) {
+      L.push(`| Top drag | ${eff.topDrag} |`);
+    }
   }
   L.push(`| Total logged (all time) | ${formatCost(totalCost)}${usd(totalCost)} |`);
   L.push(`| Requests | ${data.requests.length.toLocaleString()} |`);

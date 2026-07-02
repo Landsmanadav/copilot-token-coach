@@ -104,10 +104,14 @@ So this tool surfaces:
 
 Higher-level views layered on top of the raw cost data:
 
-- **Efficiency grade (A–F)** — one glanceable health score = 60% cache reuse +
-  40% "clean runs" (messages with no real warning). Shown in the status bar
-  (which also tints **yellow/red** when efficiency is poor or you near/exceed your
-  plan budget), as a dashboard card, and as a **per-chat grade badge**.
+- **Efficiency grade (A–F)** — one glanceable health score measuring
+  **avoidable waste only**: 60% *warm-chat* cache reuse (judged solely on
+  requests where reuse was actually possible — a chat's first request and
+  one-off focused questions are never penalized) + 40% "clean runs" with
+  partial credit (100 clean / 50 warning / 0 error per message). The card also
+  names the **top drag** — the single thing pulling your grade down. Shown in
+  the status bar (which tints **yellow/red** when efficiency is poor), as a
+  dashboard card, and as a **per-chat grade badge**.
 - **Model spend** — a per-model table of requests / tokens / cost, tagged
   **billed** vs **included**, so you see where premium budget goes. A
   `premium-overkill` coaching note flags small, billed turns a base (included)
@@ -222,8 +226,8 @@ them), or in your `settings.json`. Nothing is hard-coded.
 | `tokenCoach.slowToolWarnMs` | `10000` | Flag a message when one tool consumes more than this many ms (summed across calls). |
 | `tokenCoach.unusedToolMinChats` | `3` | Net "unused across chats" score a tool must reach before the dashboard flags it as a candidate to disable (`+1` per chat offered-but-unused, `−1` per chat used, floored at `0`). |
 | `tokenCoach.cacheIdleMinutes` | `5` | Idle minutes after which the prompt cache is assumed expired (Claude TTL ~5 min, OpenAI ~5–10 min). A mid-chat message after a longer pause whose cache reuse also dropped is flagged `cache-expired-idle`. `0` disables. |
+| `tokenCoach.cacheTargetRate` | `0.7` | Warm-chat cache hit rate that earns a perfect cache sub-score in the efficiency grade. Judged only on requests where reuse was possible (same chat, within the TTL). |
 | `tokenCoach.usdPerAiu` | `0.01` | US dollars per 1 AIU (1 AI credit = $0.01, 1 AIU ≈ 1 credit). Set `0` to hide dollar figures. |
-| `tokenCoach.planMonthlyUsd` | `19` | Your monthly plan price (Business = $19, Enterprise/Pro+ = $39). Only tints the status bar when spend gets large — no quota is shown. |
 | `tokenCoach.notifyOnExpensiveRequest` | `true` | Notify when a new request exceeds the cost threshold. |
 | `tokenCoach.notifyOnInefficiency` | `true` | Gentle, throttled nudge (≤1 / 5 min) on a new message's actionable inefficiency (cache cold mid-chat, heavy attachments). |
 | `tokenCoach.pollIntervalSeconds` | `20` | Backup poll interval; `0` disables polling. |

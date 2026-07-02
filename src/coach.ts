@@ -53,13 +53,16 @@ export interface CoachConfig {
   costInputWeight: number;
   costCachedInputWeight: number;
   costOutputWeight: number;
-  /** Monthly plan price per user (Copilot Business = $19). Kept for status-bar tinting. */
-  planMonthlyUsd: number;
   /**
    * Idle minutes after which the prompt cache is assumed to have expired. The
    * Claude (Anthropic) cache TTL is ~5 min (sliding); OpenAI's is ~5–10 min.
    */
   cacheIdleMinutes: number;
+  /**
+   * Warm-chat cache hit rate (0–1) that earns a perfect cache sub-score in the
+   * efficiency grade. Measured only over requests where reuse was possible.
+   */
+  cacheTargetRate: number;
   /**
    * Net "unused across chats" score a tool must reach before the dashboard
    * flags it as a candidate to disable. +1 per chat it was offered but never
@@ -83,8 +86,8 @@ export const DEFAULT_COACH_CONFIG: CoachConfig = {
   costInputWeight: 1,
   costCachedInputWeight: 0.1,
   costOutputWeight: 4,
-  planMonthlyUsd: 19,
   cacheIdleMinutes: 5,
+  cacheTargetRate: 0.7,
   unusedToolMinChats: 3,
 };
 

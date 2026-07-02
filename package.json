@@ -2,7 +2,7 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "publisher": "NadavLAN",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -80,13 +80,6 @@
             "minimum": 0,
             "order": 1,
             "markdownDescription": "**Alert threshold — credits per request.**\n\nToken Coach pops up a notification (and flags the row on the dashboard) only when a **single** Copilot request costs **more than this many credits**. Raise it to stay quiet, lower it to catch smaller spikes.\n\nDefault `25` credits. _1 credit = 1 AIU = $0.01, so `25` ≈ **$0.25** spent on one request — genuinely expensive, not routine._"
-          },
-          "tokenCoach.planMonthlyUsd": {
-            "type": "number",
-            "default": 19,
-            "minimum": 0,
-            "order": 2,
-            "markdownDescription": "**Monthly budget — your Copilot plan price, in dollars.**\n\nThis is the budget Token Coach measures the month's spend against: the status bar tints **green** while you're comfortably under it, **yellow** as you approach it (80%+), and **red** once you pass it.\n\nCommon plans: Pro `$10` · Business `$19` · Enterprise / Pro+ `$39`. Default `$19`.\n\n_Token Coach only ever shows what you actually **used** — never a quota or a bill — and the count resets on the 1st of each month, like GitHub's credit meter. Set `0` to turn off budget tinting._"
           }
         }
       },
@@ -172,39 +165,47 @@
             "order": 12,
             "markdownDescription": "_(Advanced)_ **Idle minutes after which the prompt cache is assumed to have expired.** If a mid-chat message arrives after a longer pause **and** its cache reuse actually dropped, it's flagged. Claude's cache TTL is ~5 min; OpenAI's ~5–10. Set `0` to disable idle detection."
           },
+          "tokenCoach.cacheTargetRate": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0.05,
+            "maximum": 1,
+            "order": 13,
+            "markdownDescription": "_(Advanced)_ **Warm-chat cache hit rate that earns a perfect cache sub-score** in the efficiency grade. The grade only judges cache reuse on requests where reuse was actually possible (same chat, within the cache TTL) — a chat's first request and one-off focused questions are never penalized. Default `0.7` (70%)."
+          },
           "tokenCoach.costInputWeight": {
             "type": "number",
             "default": 1,
             "minimum": 0,
-            "order": 13,
+            "order": 14,
             "markdownDescription": "_(Advanced)_ Price weight for **fresh (uncached) input** when splitting each request's real logged cost into input / cached / output for the breakdown. The total stays exact — only the split is estimated. Baseline `1`."
           },
           "tokenCoach.costCachedInputWeight": {
             "type": "number",
             "default": 0.1,
             "minimum": 0,
-            "order": 14,
+            "order": 15,
             "markdownDescription": "_(Advanced)_ Price weight for **cached input** in the cost split (see `#tokenCoach.costInputWeight#`). Cached reads are far cheaper, so `0.1` (~10% of fresh input)."
           },
           "tokenCoach.costOutputWeight": {
             "type": "number",
             "default": 4,
             "minimum": 0,
-            "order": 15,
+            "order": 16,
             "markdownDescription": "_(Advanced)_ Price weight for **output** in the cost split (see `#tokenCoach.costInputWeight#`). Output is the priciest, so `4` (~4× fresh input)."
           },
           "tokenCoach.unusedToolMinChats": {
             "type": "number",
             "default": 3,
             "minimum": 1,
-            "order": 16,
+            "order": 17,
             "markdownDescription": "_(Advanced)_ **How consistently a tool must go unused before it's flagged** as a candidate to disable. Net counter: +1 for each chat the tool was offered but never called, −1 (floored at `0`) for each chat it *was* used in. Default `3`."
           },
           "tokenCoach.pollIntervalSeconds": {
             "type": "number",
             "default": 20,
             "minimum": 0,
-            "order": 17,
+            "order": 18,
             "markdownDescription": "_(Advanced)_ **Backup refresh interval** (seconds), on top of the live file watcher. Set to `0` to rely on the watcher only. Default `20`."
           }
         }

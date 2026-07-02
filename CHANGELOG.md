@@ -4,6 +4,73 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-07-02
+
+### Changed — a fairer efficiency grade (measures avoidable waste only)
+- **Warm-chat cache scoring.** The old grade used the aggregate cache ratio,
+  which structurally rewarded long agent loops (high hit-rate, high cost) and
+  punished short, focused questions (cold start, tiny cost) — many users sat at
+  a permanent C at work for using Copilot *cheaply*. Cache reuse is now judged
+  only on requests where reuse was actually possible: same chat, within the
+  cache TTL. A chat's first request and one-off questions are never penalized;
+  when nothing was warm-eligible, the grade simply rests on clean runs.
+- **Partial credit for clean runs.** A message now scores 100 (clean), 50
+  (warning) or 0 (error) instead of the old binary clean/dirty.
+- **"Top drag" transparency.** The efficiency card, status-bar tooltip, chat
+  badges and the exported report now name the single biggest thing pulling the
+  grade down (e.g. "cache lost to >TTL idle gaps in 9 messages") — a grade you
+  can act on, not just a letter.
+- **New setting `tokenCoach.cacheTargetRate`** (default `0.7`) — the warm-chat
+  hit rate that earns a perfect cache sub-score.
+- **Section panels remember you.** Token & cost breakdown, Model spend and the
+  Efficiency trend open by default, but collapsing one now survives every
+  refresh (same memory as chats/messages) instead of snapping back open.
+
+### Changed — the dashboard got an instrument-panel redesign
+- **Editor-native "instrument panel" look.** Every numeral now renders in *your*
+  editor's mono font with tabular figures; labels became uppercase micro-type
+  with wide tracking; hairline rules and a faint graph-paper backdrop replace
+  heavy boxes. Built entirely from VS Code theme variables — no fonts, no
+  images, no libraries (the webview's strict CSP stays `default-src 'none'`).
+- **A sticky masthead** with the Token Coach mark, version, a pulsing **live**
+  badge (the panel auto-refreshes as Copilot writes its logs) and quiet
+  outline-style actions.
+- **KPI tiles** carry a 2px semantic accent line (hero = blue→green, efficiency
+  = its grade colour, flags = red), and the "Today" hero is deliberately the
+  biggest number on screen.
+- **Grafana-style section rails** ("Why it cost…", "Where the tokens went",
+  "Turn-by-turn"), uppercase table headers with row hover, and a staggered
+  entrance animation (disabled under `prefers-reduced-motion`).
+
+### Fixed
+- **Could contend with Copilot on the shared extension host.** Every refresh
+  re-read and re-parsed *all* debug-log files from scratch (~100 ms of synchronous
+  CPU — `JSON.parse` of multi-MB payloads + regex scans). Because the file watcher
+  fires continuously while Copilot writes its own debug log during a live session,
+  that ~100 ms blocked the shared VS Code extension host repeatedly, right when
+  Copilot was streaming — which could stall or disconnect it. Token Coach now
+  **caches each file's parsed result by (mtime, size)** and only re-parses the one
+  file that actually changed, cutting a refresh from ~100 ms to ~2–4 ms. Purely a
+  performance fix; the numbers shown are unchanged.
+- **Chat titles no longer go missing under the new cache.** A chat's generated
+  title lives in a separate `title-*.jsonl` sidecar that Copilot often finishes
+  writing *after* the last `main.jsonl` append — so the parse cache could freeze a
+  finished chat on the generic "Chat a1b2…" fallback forever. Cached entries
+  without a title now re-check just that sidecar (one tiny async read — no
+  re-parse, no synchronous CPU, so the contention fix above stays intact).
+- **The spend chart now says when it's windowed.** The daily-spend chart draws at
+  most the last ~92 days so it stays readable; with older history it now shows a
+  "(last 92 days)" tag and labels its total "in this window" instead of quietly
+  contradicting the all-time totals elsewhere on the page.
+- **Chat list cap raised 100 → 300.** With all history kept and grouped by month,
+  a low cap could silently swallow the older months at the bottom of the list.
+
+### Removed
+- **The `tokenCoach.planMonthlyUsd` setting.** It promised budget-based status-bar
+  tinting and a monthly reset — both removed in 2.2.0 — so the setting did nothing
+  and its description was misleading. (An existing value in your settings.json is
+  simply ignored.)
+
 ## [2.2.0] - 2026-07-01
 
 Stops competing with Copilot's own credit meter. The old "used this month" figure

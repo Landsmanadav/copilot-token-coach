@@ -1042,6 +1042,73 @@ export async function findExistingStorageBases(overridePath = '', derivedBase = 
 }
 
 /**
+ * Per-file parse cache. `loadAll` runs on every watcher tick, and the watcher
+ * fires continuously while Copilot is actively writing its debug log (i.e. during
+ * a live chat/agent session). Re-reading and re-parsing every log file from
+ * scratch each time costs ~100ms of *synchronous* CPU (JSON.parse of multi-MB
+ * inputMessages + regex scans) on the shared extension host — which can stall
+ * Copilot's own streaming/requests and cause disconnects. So we cache each file's
+ * parsed result keyed by (mtime, size) and only re-parse the file that actually
+ * changed (the one Copilot is currently appending to). Static files are parsed
+ * once; a refresh then costs ~1-2ms instead of ~100ms.
+ */
+interface CachedParse {
+  mtimeMs: number;
+  size: number;
+  data: ParsedData;
+  /**
+   * True once the chat's title has been read into `data.titles`. The title lives
+   * in a SEPARATE sidecar (`title-*.jsonl`) written by an async sub-session that
+   * often finishes AFTER the last `main.jsonl` append — so a cache keyed only on
+   * `main.jsonl` would freeze "no title yet" forever. While false, each cache hit
+   * re-checks the sidecar; the check is a single async readdir (+ one small file
+   * read when the sidecar exists) — no re-parse of `main.jsonl`, no synchronous
+   * CPU — so it cannot re-introduce the extension-host contention this cache
+   * exists to prevent.
+   */
+  titleDone: boolean;
+}
+const parseCache = new Map<string, CachedParse>();
+
+/**
+ * Late-title pickup for a cached entry: cheap async check for the title sidecar,
+ * mutating the cached `data.titles` in place when it appears. Sets `titleDone`
+ * so future refreshes skip even this check.
+ */
+async function refreshLateTitle(file: LogFile, hit: CachedParse): Promise<void> {
+  const title = await readChatTitle(path.dirname(file.filePath));
+  if (title) {
+    hit.data.titles[file.sessionId] = title;
+    hit.titleDone = true;
+  }
+}
+
+/** Parse a log file, reusing the cached result when the file is unchanged. */
+async function parseLogFileCached(file: LogFile): Promise<ParsedData> {
+  let st: fs.Stats;
+  try {
+    st = await fsp.stat(file.filePath);
+  } catch {
+    return { requests: [], toolCalls: [], titles: {} };
+  }
+  const hit = parseCache.get(file.filePath);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    if (!hit.titleDone) {
+      await refreshLateTitle(file, hit);
+    }
+    return hit.data;
+  }
+  const data = await parseLogFile(file);
+  parseCache.set(file.filePath, {
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    data,
+    titleDone: Boolean(data.titles[file.sessionId]),
+  });
+  return data;
+}
+
+/**
  * Find and parse all logs, returning requests + tool calls. Requests are sorted
  * newest-first (the status bar / summaries rely on that ordering).
  */
@@ -1051,8 +1118,18 @@ export async function loadAll(overridePath = '', derivedBase = ''): Promise<Pars
   const toolCalls: ToolCallRecord[] = [];
   const titles: Record<string, string> = {};
 
-  // Parse files concurrently — they're independent.
-  const parsed = await Promise.all(files.map((f) => parseLogFile(f)));
+  // Drop cache entries for files that no longer exist (rotated away), so the
+  // cache stays bounded to the set of log files currently on disk.
+  const live = new Set(files.map((f) => f.filePath));
+  for (const key of [...parseCache.keys()]) {
+    if (!live.has(key)) {
+      parseCache.delete(key);
+    }
+  }
+
+  // Parse files concurrently — they're independent. Unchanged files come straight
+  // from the cache, so only the file Copilot is actively writing gets re-parsed.
+  const parsed = await Promise.all(files.map((f) => parseLogFileCached(f)));
   // Final safety net against double-counting: every record carries a stable id
   // (`sessionId:ts:index`) that is identical across re-parses of the same file,
   // so de-duping by id collapses any duplicate that slipped past file discovery.

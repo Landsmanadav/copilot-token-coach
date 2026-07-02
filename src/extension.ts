@@ -97,8 +97,8 @@ function getCoachConfig(): CoachConfig {
     costInputWeight: cfg.get('costInputWeight', DEFAULT_COACH_CONFIG.costInputWeight),
     costCachedInputWeight: cfg.get('costCachedInputWeight', DEFAULT_COACH_CONFIG.costCachedInputWeight),
     costOutputWeight: cfg.get('costOutputWeight', DEFAULT_COACH_CONFIG.costOutputWeight),
-    planMonthlyUsd: cfg.get('planMonthlyUsd', DEFAULT_COACH_CONFIG.planMonthlyUsd),
     cacheIdleMinutes: cfg.get('cacheIdleMinutes', DEFAULT_COACH_CONFIG.cacheIdleMinutes),
+    cacheTargetRate: cfg.get('cacheTargetRate', DEFAULT_COACH_CONFIG.cacheTargetRate),
     unusedToolMinChats: cfg.get('unusedToolMinChats', DEFAULT_COACH_CONFIG.unusedToolMinChats),
   };
 }
@@ -207,10 +207,15 @@ function buildStatusTooltip(s: TooltipStats, config: CoachConfig): vscode.Markdo
   const blocks: string[] = [];
 
   if (s.eff.hasData) {
+    const cacheBit = s.eff.hasCacheData
+      ? `Cache reuse ${s.eff.cacheScore}/100 · `
+      : `Cache reuse n/a (no warm-chat requests) · `;
     blocks.push(
       `**$(graph) Token Coach** — Efficiency **${s.eff.grade}** · ${s.eff.score}/100\n\n` +
-        `Cache reuse ${s.eff.cacheScore}/100 · Clean runs ${s.eff.cleanScore}/100 ` +
-        `_(${s.eff.cleanMessages}/${s.eff.messageCount} messages)_`
+        cacheBit +
+        `Clean runs ${s.eff.cleanScore}/100 ` +
+        `_(${s.eff.cleanMessages}/${s.eff.messageCount} messages fully clean)_` +
+        (s.eff.topDrag ? `\n\nTop drag: ${s.eff.topDrag}` : '')
     );
   } else {
     blocks.push(`**$(graph) Token Coach**`);

@@ -852,7 +852,9 @@ function renderChat(
   const eff = computeChatEfficiency(chat, config);
   const effBadge = eff.hasData
     ? `<span class="grade-badge ${gradeClass(eff.score)} tip tip-left" data-tip="${escapeHtml(
-        `Chat efficiency ${eff.score}/100 — cache reuse ${eff.cacheScore}, clean runs ${eff.cleanScore} (${eff.cleanMessages}/${eff.messageCount}).`
+        `Chat efficiency ${eff.score}/100 — warm cache ${eff.hasCacheData ? eff.cacheScore : 'n/a'}, ` +
+          `clean runs ${eff.cleanScore} (${eff.cleanMessages}/${eff.messageCount} fully clean)` +
+          `${eff.topDrag ? ` · top drag: ${eff.topDrag}` : ''}.`
       )}">${eff.grade}</span>`
     : '';
 
@@ -1196,21 +1198,28 @@ function renderEfficiencyCard(eff: EfficiencyScore): string {
     return '';
   }
   const help =
-    `A single health grade for your Copilot usage. Score = 60% cache reuse + 40% clean runs. ` +
-    `Cache reuse rewards staying in a chat (cached input tokens are billed far cheaper); ` +
-    `clean runs is the share of messages with no warning (large input, low mid-chat cache, ` +
-    `heavy attachments, expensive request). Higher = cheaper. ` +
-    `Aggregate cache hit rate: ${formatPercent(eff.cacheHitRate)}.`;
+    `A single health grade measuring AVOIDABLE waste only. Cache reuse (60%) is judged solely on ` +
+    `requests where reuse was possible — same chat, within the cache TTL. A chat's first request is ` +
+    `cold by definition and one-off focused questions are the cheap behaviour, so neither is penalized. ` +
+    `Clean runs (40%) gives partial credit: a message scores 100 with no issues, 50 with a warning, 0 ` +
+    `with an error. ` +
+    (eff.hasCacheData
+      ? `Warm-chat cache hit rate: ${formatPercent(eff.cacheHitRate)}.`
+      : `No warm-chat requests yet, so the grade currently rests on clean runs alone.`);
   const col =
     eff.score >= 75 ? CHART.green : eff.score >= 50 ? CHART.yellow : CHART.red;
+  const drag = eff.topDrag
+    ? `<div class="card-sub muted">↓ ${escapeHtml(eff.topDrag)}</div>`
+    : '';
   return `
     <div class="card card-eff ${gradeClass(eff.score)}">
       <div class="card-label">Efficiency <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
       <div class="card-ringrow">
         ${ring(eff.score / 100, { label: eff.grade, sub: `${eff.score}`, color: col, size: 76, thickness: 8 })}
         <div class="card-ringtext">
-          <div class="card-sub muted">Cache reuse ${eff.cacheScore}</div>
+          <div class="card-sub muted">${eff.hasCacheData ? `Warm cache ${eff.cacheScore}` : 'Warm cache n/a'}</div>
           <div class="card-sub muted">Clean ${eff.cleanScore} <span class="muted">(${eff.cleanMessages}/${eff.messageCount})</span></div>
+          ${drag}
         </div>
       </div>
     </div>`;
@@ -1271,7 +1280,7 @@ function scoreColor(score: number): string {
  * The fixed scale is deliberate — auto-scaling made a few-point change look like
  * a cliff; on 0–100 the line sits where it honestly is.
  */
-function renderHistory(history: DailySnapshot[]): string {
+function renderHistory(history: DailySnapshot[], isOpen: boolean): string {
   if (history.length < 2) {
     return ''; // need at least two days to call it a trend
   }
@@ -1298,7 +1307,7 @@ function renderHistory(history: DailySnapshot[]): string {
     ],
   });
   return `
-    <details class="history" open>
+    <details class="history" data-id="panel:history"${isOpen ? ' open' : ''}>
       <summary>📈 Efficiency trend <span class="muted small">(score 0–100 per day — hover the chart for that day’s detail)</span></summary>
       <div class="hist-bands muted small">
         <span class="hist-band-key"><span class="hist-band-dot" style="background:var(--vscode-charts-green,#4ec9b0)"></span>75–100 (A)</span>
@@ -1362,7 +1371,7 @@ function buildModelSpend(data: ParsedData, config: CoachConfig): ModelSpend[] {
  * input-vs-output token share — a high input share with little output is the
  * classic "shovel in context, get little produced" signal.
  */
-function renderTokenBreakdown(summary: Summary, config: CoachConfig): string {
+function renderTokenBreakdown(summary: Summary, config: CoachConfig, isOpen: boolean): string {
   const input = summary.totalInputTokens;
   const output = summary.totalOutputTokens;
   const tokenTotal = input + output;
@@ -1419,7 +1428,7 @@ function renderTokenBreakdown(summary: Summary, config: CoachConfig): string {
     )
     .join('');
   return `
-    <details class="model-spend" open>
+    <details class="model-spend" data-id="panel:breakdown"${isOpen ? ' open' : ''}>
       <summary>🔬 Token &amp; cost breakdown
         <span class="muted small">(input ${inputPct}% / output ${100 - inputPct}% · per-bucket AIU is an estimate <span class="tip info" data-tip="${escapeHtml(
           help
@@ -1440,7 +1449,7 @@ function renderTokenBreakdown(summary: Summary, config: CoachConfig): string {
  * last ~92 days). The single most useful view a cost dashboard can open with
  * (are you spiking or steady?). Idle days show as gaps.
  */
-function renderSpendChart(daily: DaySpend[], config: CoachConfig): string {
+function renderSpendChart(daily: DaySpend[], config: CoachConfig, windowCapped: boolean): string {
   const active = daily.filter((d) => d.total > 0);
   if (active.length < 1) {
     return '';
@@ -1473,10 +1482,20 @@ function renderSpendChart(daily: DaySpend[], config: CoachConfig): string {
         )}</span>`
     )
     .join('');
+  // When the axis is capped (history older than the ~92-day window exists but
+  // isn't drawn), say so — otherwise this chart's "total" would silently
+  // contradict the all-time figures elsewhere on the page.
+  const windowTag = windowCapped
+    ? ` <span class="muted small tip" data-tip="${escapeHtml(
+        'You have logged history older than this window. The chart shows the last ~92 days so it stays readable; ' +
+          'the totals in the cards above and the chat list below still cover everything.'
+      )}">(last 92 days)</span>`
+    : '';
+  const totalLabel = windowCapped ? 'in this window' : 'total logged';
   return `
     <div class="panel panel-chart">
       <div class="panel-head">
-        <span class="panel-title">💵 Spend over time</span>
+        <span class="panel-title">💵 Spend over time${windowTag}</span>
         <span class="panel-legend">${legend}</span>
       </div>
       <div class="chart-body">${columns(bars, series, { height: 150 })}</div>
@@ -1487,7 +1506,7 @@ function renderSpendChart(daily: DaySpend[], config: CoachConfig): string {
         )}">▲ peak ${escapeHtml(fmt(peak.total))}</span>
         <span>${escapeHtml(formatDateShort(last.ts))}</span>
       </div>
-      <div class="panel-foot muted">${escapeHtml(fmt(total))} total logged · ${active.length} active day${
+      <div class="panel-foot muted">${escapeHtml(fmt(total))} ${totalLabel} · ${active.length} active day${
         active.length === 1 ? '' : 's'
       }</div>
     </div>`;
@@ -1532,7 +1551,7 @@ function renderModelBars(data: ParsedData, config: CoachConfig): string {
 }
 
 /** "Where your premium budget goes" — per-model spend table, billed vs included. */
-function renderModelSpend(data: ParsedData, config: CoachConfig): string {
+function renderModelSpend(data: ParsedData, config: CoachConfig, isOpen: boolean): string {
   const rows = buildModelSpend(data, config);
   if (rows.length === 0) {
     return '';
@@ -1581,7 +1600,7 @@ function renderModelSpend(data: ParsedData, config: CoachConfig): string {
     })
     .join('');
   return `
-    <details class="model-spend" open>
+    <details class="model-spend" data-id="panel:models"${isOpen ? ' open' : ''}>
       <summary>💸 Model spend
         <span class="muted small">(where your premium budget goes — “included” models are free under your plan)</span></summary>
       <table class="mini">
@@ -1650,13 +1669,13 @@ function renderUnusedToolTrend(report: UnusedToolReport): string {
     </div>`;
 }
 
-function renderToolInventory(inv: ToolInventory): string {
+function renderToolInventory(inv: ToolInventory, isOpen: boolean): string {
   if (!inv.hasData || inv.unused.length === 0) {
     return '';
   }
   const items = inv.unused.map((n) => `<li><code>${escapeHtml(n)}</code></li>`).join('');
   return `
-    <details class="tools-inv card-flag">
+    <details class="tools-inv card-flag" data-id="panel:tools"${isOpen ? ' open' : ''}>
       <summary>🧹 ${inv.unused.length} tool${inv.unused.length === 1 ? '' : 's'} defined but never called
         <span class="muted small">(dead weight in every cached request)</span></summary>
       <p class="muted small">These tools are offered to the model on every request — so they sit in your cached
@@ -1721,7 +1740,8 @@ export function setExtensionVersion(v: string): void {
   extensionVersion = v;
 }
 
-function renderHtml(
+/** Exported for the design-preview harness (scripts render it outside VS Code). */
+export function renderHtml(
   webview: vscode.Webview,
   data: ParsedData,
   config: CoachConfig,
@@ -1743,8 +1763,21 @@ function renderHtml(
   const unusedTrend = analyzeUnusedToolTrend(data, config.unusedToolMinChats);
   const daily = buildDailySpend(data, config);
 
-  const MAX_CHATS = 100;
+  // With all history kept (grouped by month), a low cap would silently hide the
+  // older months entirely — so keep it high; rendering is cheap enough.
+  const MAX_CHATS = 300;
   const shown = chats.slice(0, MAX_CHATS);
+  // Does logged history extend past the spend chart's ~92-day axis? If so the
+  // chart must say it's windowed (see renderSpendChart).
+  const spendWindowCapped =
+    daily.length > 0 &&
+    summary.coverageStartTs > 0 &&
+    startOfDay(summary.coverageStartTs) < daily[0].ts;
+
+  // Section panels default open (tools default closed), but a user's explicit
+  // expand/collapse is remembered across refreshes exactly like chats/messages —
+  // a refresh must never snap a panel back to its default.
+  const panelOpen = (id: string, def: boolean) => (openState.has(id) ? openState.get(id)! : def);
 
   const body =
     chats.length === 0
@@ -1754,13 +1787,13 @@ function renderHtml(
         ${renderCoverage(summary)}
         ${renderSummary(summary, efficiency, inventory, config)}
         <div class="chart-row">
-          ${renderSpendChart(daily, config)}
+          ${renderSpendChart(daily, config, spendWindowCapped)}
           ${renderModelBars(data, config)}
         </div>
-        ${renderHistory(history)}
-        ${renderTokenBreakdown(summary, config)}
-        ${renderModelSpend(data, config)}
-        ${renderToolInventory(inventory)}
+        ${renderHistory(history, panelOpen('panel:history', true))}
+        ${renderTokenBreakdown(summary, config, panelOpen('panel:breakdown', true))}
+        ${renderModelSpend(data, config, panelOpen('panel:models', true))}
+        ${renderToolInventory(inventory, panelOpen('panel:tools', false))}
         ${
           chats.length > MAX_CHATS
             ? `<p class="muted">Showing the ${MAX_CHATS} most recent of ${chats.length.toLocaleString()} chats.</p>`
@@ -1782,71 +1815,177 @@ function renderHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Token Coach</title>
   <style>
-    :root { color-scheme: light dark; }
+    /* =====================================================================
+       Design system — "instrument panel". Every token derives from VS Code's
+       own theme variables via color-mix, so light/dark/high-contrast all work
+       with zero images, zero fonts, zero external anything (strict CSP).
+       Signature: numerals in the USER'S editor mono font, uppercase micro
+       labels with wide tracking, hairline rules, faint graph-paper backdrop.
+       ===================================================================== */
+    :root {
+      color-scheme: light dark;
+      --tc-mono: var(--vscode-editor-font-family, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+      --tc-line: color-mix(in srgb, var(--vscode-foreground) 13%, transparent);
+      --tc-line-strong: color-mix(in srgb, var(--vscode-foreground) 24%, transparent);
+      --tc-surface: color-mix(in srgb, var(--vscode-foreground) 4%, var(--vscode-editor-background));
+      --tc-surface-2: color-mix(in srgb, var(--vscode-foreground) 7%, var(--vscode-editor-background));
+      --tc-grid: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+      --tc-blue: var(--vscode-charts-blue, #3794ff);
+      --tc-green: var(--vscode-charts-green, #4ec9b0);
+      --tc-yellow: var(--vscode-charts-yellow, #d7ba7d);
+      --tc-red: var(--vscode-charts-red, #f14c4c);
+      --tc-purple: var(--vscode-charts-purple, #b180d7);
+    }
     body {
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size, 13px);
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
-      padding: 16px;
+      padding: 0 20px 20px;
       /* Long unbreakable strings (file paths, tokens, model ids) must wrap, not
          push the layout wider than the panel. overflow-x guards anything missed. */
       overflow-wrap: anywhere;
       overflow-x: hidden;
     }
-    *, *::before, *::after { box-sizing: border-box; }
-    h1 { font-size: 1.3em; margin: 0; }
-    .ver {
-      font-size: 0.75em; padding: 2px 7px; border-radius: 10px; align-self: center;
-      background: var(--vscode-badge-background, rgba(127,127,127,0.25));
-      color: var(--vscode-badge-foreground, inherit); font-variant-numeric: tabular-nums;
+    /* Faint graph-paper backdrop — atmosphere without a single image byte. */
+    body::before {
+      content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background-image:
+        linear-gradient(var(--tc-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--tc-grid) 1px, transparent 1px);
+      background-size: 26px 26px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.35) 420px, rgba(0,0,0,0.15));
+      -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.35) 420px, rgba(0,0,0,0.15));
     }
+    *, *::before, *::after { box-sizing: border-box; }
+
+    /* Numerals everywhere read as instrument readouts: the user's own editor
+       mono font, lining tabular figures. */
+    .num, .card-value, .msg-cost, .msg-usd, .msg-tokens, .chat-cost, .chat-usd, .chat-tokens,
+    .month-cost, .month-usd, .day-cost, .day-usd, .story-cost, .item-stats, .item-cost,
+    .ranked-value, .chart-axis, .ver, .bar-pct {
+      font-family: var(--tc-mono); font-variant-numeric: tabular-nums;
+    }
+
+    /* Masthead — a sticky instrument header strip. */
+    .masthead {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+      margin: 0 -20px 6px; padding: 12px 20px 11px;
+      background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent);
+      backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px);
+      border-bottom: 1px solid var(--tc-line);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand-mark { flex: 0 0 auto; display: block; }
+    h1 { font-size: 0.95em; margin: 0; text-transform: uppercase; letter-spacing: 0.2em; font-weight: 700; white-space: nowrap; }
+    h1 .brand-dim { color: var(--vscode-descriptionForeground); font-weight: 500; }
+    .ver {
+      font-size: 0.72em; padding: 1px 7px; border-radius: 3px;
+      border: 1px solid var(--tc-line-strong); color: var(--vscode-descriptionForeground);
+    }
+    .live {
+      display: inline-flex; align-items: center; gap: 5px; cursor: help;
+      font-size: 0.66em; text-transform: uppercase; letter-spacing: 0.16em;
+      color: var(--tc-green); padding: 2px 8px; border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--tc-green) 45%, transparent);
+    }
+    .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tc-green); animation: tc-pulse 2.4s ease-in-out infinite; }
+    @keyframes tc-pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--tc-green) 45%, transparent); }
+      50% { opacity: 0.45; box-shadow: 0 0 0 4px transparent; }
+    }
+    .mast-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .mast-note { margin: 10px 0 14px; font-size: 0.85em; }
     .small { font-size: 0.85em; }
-    .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
     .muted { color: var(--vscode-descriptionForeground); }
     .hint { margin: 8px 0 12px; font-size: 0.9em; }
+
     .coverage {
       display: flex; align-items: flex-start; gap: 8px; margin: 0 0 16px;
-      padding: 10px 14px; border-radius: 6px; font-size: 0.9em; line-height: 1.45;
-      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 12%, transparent);
-      border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 35%, transparent);
+      padding: 10px 14px; border-radius: 5px; font-size: 0.9em; line-height: 1.45;
+      background: color-mix(in srgb, var(--tc-blue) 9%, transparent);
+      border: 1px solid color-mix(in srgb, var(--tc-blue) 30%, transparent);
+      border-left: 3px solid color-mix(in srgb, var(--tc-blue) 65%, transparent);
     }
     .coverage-icon { flex: 0 0 auto; }
-    .coverage b { font-variant-numeric: tabular-nums; }
-    button {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer;
-      font-family: inherit; font-size: inherit;
-    }
-    button:hover { background: var(--vscode-button-hoverBackground); }
+    .coverage b { font-family: var(--tc-mono); font-variant-numeric: tabular-nums; }
 
-    /* Summary cards */
+    /* Buttons read as instrument toggles: quiet outlines, uppercase micro text. */
+    button {
+      background: transparent; color: var(--vscode-foreground);
+      border: 1px solid var(--tc-line-strong); padding: 4px 11px; border-radius: 4px; cursor: pointer;
+      font-family: inherit; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.08em;
+      transition: border-color 100ms ease, color 100ms ease, background 100ms ease;
+    }
+    button:hover {
+      border-color: color-mix(in srgb, var(--tc-blue) 65%, transparent);
+      color: var(--tc-blue);
+      background: color-mix(in srgb, var(--tc-blue) 8%, transparent);
+    }
+
+    /* One orchestrated load: cards and panels rise in with a slight stagger. */
+    @keyframes tc-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+    .kpi-grid .card, .chart-row .panel, .coverage, .unused-trend, .history, .model-spend, .tools-inv {
+      animation: tc-in 0.36s cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+    }
+    .kpi-grid .card:nth-child(1) { animation-delay: 0.03s; }
+    .kpi-grid .card:nth-child(2) { animation-delay: 0.07s; }
+    .kpi-grid .card:nth-child(3) { animation-delay: 0.11s; }
+    .kpi-grid .card:nth-child(4) { animation-delay: 0.15s; }
+    .kpi-grid .card:nth-child(5) { animation-delay: 0.19s; }
+    .kpi-grid .card:nth-child(6) { animation-delay: 0.23s; }
+    .kpi-grid .card:nth-child(7) { animation-delay: 0.27s; }
+    .kpi-grid .card:nth-child(8) { animation-delay: 0.31s; }
+    .chart-row .panel:nth-child(1) { animation-delay: 0.2s; }
+    .chart-row .panel:nth-child(2) { animation-delay: 0.28s; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+
+    /* Themed thin scrollbar — part of the instrument, not the browser's. */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb {
+      background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+      border-radius: 5px; border: 2px solid var(--vscode-editor-background);
+    }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* Summary cards — instrument tiles: hairline body, a 2px semantic accent
+       along the top, uppercase tracked micro-label, big mono readout. */
     .cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
     .card {
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.08));
-      border: 1px solid var(--vscode-widget-border, transparent);
-      border-radius: 6px; padding: 12px 16px; min-width: 130px;
+      position: relative; overflow: hidden;
+      background: var(--tc-surface);
+      border: 1px solid var(--tc-line);
+      border-radius: 5px; padding: 12px 14px; min-width: 130px;
+      transition: border-color 120ms ease, transform 120ms ease;
     }
-    .card-flag { border-color: var(--vscode-editorError-foreground); }
-    .card-label { font-size: 0.8em; text-transform: uppercase; letter-spacing: .04em; color: var(--vscode-descriptionForeground); }
-    .card-value { font-size: 1.4em; font-weight: 600; margin-top: 4px; }
-    .card-sub { font-size: 0.8em; margin-top: 2px; }
-    .card-budget { min-width: 220px; }
-    .budget-of { font-size: 0.6em; font-weight: 400; }
-    .budget-bar { height: 8px; border-radius: 4px; margin-top: 8px; overflow: hidden;
-      background: var(--vscode-widget-border, rgba(127,127,127,0.25)); }
-    .budget-fill { display: block; height: 100%;
-      background: var(--vscode-charts-green, var(--vscode-progressBar-background)); }
-    .budget-fill.over { background: var(--vscode-editorError-foreground); }
+    .card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: var(--card-accent, transparent);
+    }
+    .card:hover { border-color: var(--tc-line-strong); }
+    .card-flag { --card-accent: var(--tc-red); border-color: color-mix(in srgb, var(--tc-red) 45%, transparent); }
+    .card-hero { --card-accent: linear-gradient(90deg, var(--tc-blue), var(--tc-green)); }
+    .card-label {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 0.68em; text-transform: uppercase; letter-spacing: 0.13em; font-weight: 600;
+      color: var(--vscode-descriptionForeground);
+    }
+    .card-value { font-size: 1.5em; font-weight: 600; margin-top: 6px; letter-spacing: -0.01em; }
+    /* Parenthetical context inside a value (e.g. the priciest message's text)
+       drops back to small UI type so it doesn't compete with the readout. */
+    .card-value .muted { font-size: 0.55em; font-family: var(--vscode-font-family); font-weight: 400; }
+    .card-sub { font-size: 0.8em; margin-top: 3px; }
+    /* The hero (Today) carries the visual weight — the 40% of the 40-30-20-10 rule. */
+    .card-hero .card-value { font-size: 2.5em; font-weight: 700; line-height: 1.1; }
 
     /* Efficiency grade card */
-    .card-eff .grade { font-weight: 800; font-size: 1.05em; }
     .card-eff .score-of { font-size: 0.6em; font-weight: 400; }
-    .card-eff.grade-good .grade { color: var(--vscode-charts-green, #4ec9b0); }
-    .card-eff.grade-mid .grade { color: var(--vscode-charts-yellow, #d7ba7d); }
-    .card-eff.grade-bad .grade { color: var(--vscode-editorError-foreground); }
-    .card-eff.grade-bad { border-color: var(--vscode-editorError-foreground); }
+    .card-eff.grade-good { --card-accent: var(--tc-green); }
+    .card-eff.grade-mid { --card-accent: var(--tc-yellow); }
+    .card-eff.grade-bad { --card-accent: var(--tc-red); border-color: color-mix(in srgb, var(--tc-red) 45%, transparent); }
 
     /* Per-chat grade badge (in the chat header) */
     .grade-badge {
@@ -1861,9 +2000,10 @@ function renderHtml(
 
     /* Unused-tool trend banner (top of dashboard) */
     .unused-trend {
-      border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
-      border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;
-      background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 50%, transparent);
+      border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+      border-radius: 5px; padding: 12px 16px; margin-bottom: 16px;
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 8%, transparent);
     }
     .unused-trend-head { font-size: 1.02em; }
     .unused-trend-list {
@@ -1872,54 +2012,43 @@ function renderHtml(
     }
     .unused-trend-list li {
       display: inline-flex; align-items: center; gap: 4px;
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.08));
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
-      border-radius: 6px; padding: 3px 9px;
+      background: var(--tc-surface);
+      border: 1px solid var(--tc-line-strong);
+      border-radius: 4px; padding: 3px 9px;
     }
     .unused-trend-note { margin: 6px 0 0; line-height: 1.5; }
 
-    /* Tool inventory (structural waste) */
-    .tools-inv {
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
-      border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+    /* Collapsible section panels (model spend / breakdown / trend / tools):
+       one shared look — surface tile with an uppercase rail summary. */
+    .tools-inv, .model-spend, .history {
+      border: 1px solid var(--tc-line);
+      border-radius: 5px; padding: 10px 14px; margin-bottom: 16px;
+      background: var(--tc-surface);
     }
-    .tools-inv > summary { cursor: pointer; font-weight: 600; }
+    .tools-inv > summary, .model-spend > summary, .history > summary {
+      cursor: pointer; list-style: none; user-select: none;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-size: 0.78em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.11em;
+    }
+    .tools-inv > summary::-webkit-details-marker, .model-spend > summary::-webkit-details-marker,
+    .history > summary::-webkit-details-marker { display: none; }
+    .tools-inv > summary::before, .model-spend > summary::before, .history > summary::before {
+      content: '▸'; color: var(--vscode-descriptionForeground); transition: transform 0.12s ease;
+    }
+    .tools-inv[open] > summary::before, .model-spend[open] > summary::before,
+    .history[open] > summary::before { transform: rotate(90deg); }
+    .tools-inv > summary .muted, .model-spend > summary .muted, .history > summary .muted {
+      text-transform: none; letter-spacing: normal; font-weight: 400;
+    }
+    .model-spend[open] > summary, .history[open] > summary { margin-bottom: 8px; }
     .tool-list { columns: 2; gap: 24px; margin: 8px 0 2px; padding-left: 18px; }
     .tool-list li { margin: 2px 0; }
-
-    /* Model spend table */
-    .model-spend {
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
-      border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
-    }
-    .model-spend > summary { cursor: pointer; font-weight: 600; margin-bottom: 6px; }
     .tag-billed, .tag-included {
       font-size: 0.7em; text-transform: uppercase; letter-spacing: .03em;
       padding: 0 5px; border-radius: 3px; margin-left: 4px;
     }
     .tag-billed { background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 22%, transparent); }
-    .tag-included { background: color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 22%, transparent); }
-
-    /* Efficiency trend */
-    .history {
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
-      border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
-    }
-    .history > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
-    .hist-row { display: flex; gap: 8px; flex-wrap: wrap; }
-    .hist-chip {
-      display: inline-flex; flex-direction: column; align-items: center; cursor: help;
-      min-width: 42px; padding: 4px 6px; border-radius: 6px;
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.35));
-    }
-    .hist-grade { font-weight: 800; }
-    .hist-chip.grade-good .hist-grade { color: var(--vscode-charts-green, #4ec9b0); }
-    .hist-chip.grade-mid .hist-grade { color: var(--vscode-charts-yellow, #d7ba7d); }
-    .hist-chip.grade-bad .hist-grade { color: var(--vscode-editorError-foreground); }
-    .hist-date { font-size: 0.75em; }
+    .tag-included { background: color-mix(in srgb, var(--tc-green) 22%, transparent); }
 
     /* Chat (session) groups */
     .chats { display: flex; flex-direction: column; gap: 18px; }
@@ -1966,31 +2095,32 @@ function renderHtml(
     .day-body { display: flex; flex-direction: column; gap: 14px; padding: 12px 0 4px; }
 
     .chat {
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
-      border-radius: 8px;
-      background: var(--vscode-sideBar-background, rgba(127,127,127,0.04));
+      border: 1px solid var(--tc-line);
+      border-radius: 5px;
+      background: var(--tc-surface);
+      transition: border-color 120ms ease;
     }
-    .chat > summary { cursor: pointer; padding: 12px 14px; list-style: none; user-select: none; border-radius: 8px; }
+    .chat:hover { border-color: var(--tc-line-strong); }
+    .chat > summary { cursor: pointer; padding: 12px 14px; list-style: none; user-select: none; border-radius: 5px; }
     .chat > summary::-webkit-details-marker { display: none; }
     .chat-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
     .chat-icon { font-size: 1.05em; }
     .chat-title { font-size: 1.05em; font-weight: 700; flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
-    .chat-cost { font-weight: 700; font-variant-numeric: tabular-nums; }
-    .chat-usd { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--vscode-charts-green, #4ec9b0); }
-    .chat-tokens { font-variant-numeric: tabular-nums; }
+    .chat-cost { font-weight: 700; }
+    .chat-usd { font-weight: 600; color: var(--tc-green); }
     .chat-meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.85em; margin-top: 4px; }
     .chat-models { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
     .chat-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 8px; }
-    .chat[open] > summary { border-bottom: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.2)); border-radius: 8px 8px 0 0; margin-bottom: 10px; }
+    .chat[open] > summary { border-bottom: 1px solid var(--tc-line); border-radius: 5px 5px 0 0; margin-bottom: 10px; }
 
     /* Message rows */
     .messages { display: flex; flex-direction: column; gap: 8px; }
     .msg {
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.25));
-      border-left-width: 4px; border-left-color: transparent;
-      border-radius: 6px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+      border: 1px solid var(--tc-line);
+      border-left-width: 3px; border-left-color: transparent;
+      border-radius: 4px; background: var(--tc-surface-2);
     }
-    .msg > summary { cursor: pointer; padding: 10px 12px; list-style: none; user-select: none; border-radius: 6px; }
+    .msg > summary { cursor: pointer; padding: 10px 12px; list-style: none; user-select: none; border-radius: 4px; }
     .msg > summary::-webkit-details-marker { display: none; }
     .msg-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
     .msg-cost { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 80px; }
@@ -2017,7 +2147,17 @@ function renderHtml(
     .badge-x { opacity: 0.7; }
     .msg-warnings { margin-top: 6px; }
     .msg-body { padding: 4px 12px 14px; }
-    .section-title { font-weight: 600; margin: 14px 0 6px; padding-top: 8px; border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.2)); }
+    /* Section rails inside an expanded message: uppercase micro-label with a
+       hairline rule running out to the right — Grafana-style panel dividers. */
+    .section-title {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 0.72em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.11em;
+      color: var(--vscode-descriptionForeground);
+      margin: 16px 0 8px;
+    }
+    .section-title::after { content: ''; flex: 1; border-top: 1px solid var(--tc-line); }
+    .section-title .muted { text-transform: none; letter-spacing: normal; font-weight: 400; }
+    .section-title .diag { font-size: 1em; }
 
     /* Cost drivers */
     .drivers { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -2025,16 +2165,22 @@ function renderHtml(
     .driver-head { font-size: 0.9em; margin-bottom: 4px; }
     table.mini { width: 100%; border-collapse: collapse; font-size: 0.85em; }
     table.mini th, table.mini td {
-      text-align: left; padding: 3px 8px;
-      border-bottom: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.15)); vertical-align: middle;
+      text-align: left; padding: 4px 8px;
+      border-bottom: 1px solid var(--tc-line); vertical-align: middle;
       overflow-wrap: anywhere; word-break: break-word;
     }
-    table.mini .num, table.mini th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    table.mini thead th {
+      font-size: 0.78em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em;
+      color: var(--vscode-descriptionForeground);
+      border-bottom: 1px solid var(--tc-line-strong);
+    }
+    table.mini .num, table.mini th.num { text-align: right; font-family: var(--tc-mono); font-variant-numeric: tabular-nums; }
+    table.mini tbody tr:hover td { background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent); }
     table.mini tr.highlight td { background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent); }
     table.mini tr.grp td {
       font-weight: 600; padding-top: 10px;
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.07));
-      border-bottom: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+      background: var(--tc-surface-2);
+      border-bottom: 1px solid var(--tc-line-strong);
     }
 
     /* "Why it cost X" story rows */
@@ -2167,15 +2313,18 @@ function renderHtml(
       gap: 14px; margin-bottom: 16px;
     }
     .panel {
-      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
-      border-radius: 8px; padding: 12px 14px;
-      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.05));
+      border: 1px solid var(--tc-line);
+      border-radius: 5px; padding: 12px 14px;
+      background: var(--tc-surface);
       display: flex; flex-direction: column; min-width: 0;
+      transition: border-color 120ms ease;
     }
+    .panel:hover { border-color: var(--tc-line-strong); }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-    .panel-title { font-weight: 600; }
+    .panel-title { font-size: 0.78em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.11em; }
+    .panel-title .muted, .panel-title .small { text-transform: none; letter-spacing: normal; font-weight: 400; }
     .panel-legend { display: flex; gap: 10px 14px; flex-wrap: wrap; font-size: 0.8em; }
-    .panel-foot { font-size: 0.8em; margin-top: 8px; }
+    .panel-foot { font-size: 0.8em; margin-top: 8px; font-family: var(--tc-mono); font-variant-numeric: tabular-nums; }
     .chart-body { width: 100%; }
     .chart-axis { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.75em; margin-top: 4px; gap: 8px; }
     .chart-axis-mid { font-variant-numeric: tabular-nums; cursor: help; }
@@ -2254,14 +2403,24 @@ function renderHtml(
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <h1>📊 Token Coach</h1>
-    ${extensionVersion ? `<span class="ver">v${escapeHtml(extensionVersion)}</span>` : ''}
-    <button id="refresh" title="Re-scan logs">↻ Refresh</button>
-    <button id="export" title="Save a Markdown report">⤓ Export</button>
-    <button id="settings" title="Open Token Coach settings">⚙ Settings</button>
-    <span class="muted">Usage in credits (1 credit = 1 AIU = $0.01). Context sizes are estimates (~4 chars ≈ 1 token).</span>
-  </div>
+  <header class="masthead">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <rect x="1"    y="9" width="3.6" height="6"  rx="1" fill="var(--vscode-charts-blue, #3794ff)"/>
+        <rect x="6.2"  y="5" width="3.6" height="10" rx="1" fill="var(--vscode-charts-green, #4ec9b0)"/>
+        <rect x="11.4" y="1" width="3.6" height="14" rx="1" fill="var(--vscode-charts-purple, #b180d7)"/>
+      </svg>
+      <h1>Token<span class="brand-dim">&nbsp;Coach</span></h1>
+      ${extensionVersion ? `<span class="ver">v${escapeHtml(extensionVersion)}</span>` : ''}
+      <span class="live tip" data-tip="Live: the dashboard re-reads Copilot's debug logs automatically — a file watcher fires as Copilot writes, plus a backup poll. No manual refresh needed."><span class="live-dot"></span>live</span>
+    </div>
+    <div class="mast-actions">
+      <button id="refresh" title="Re-scan logs">↻ Refresh</button>
+      <button id="export" title="Save a Markdown report">⤓ Export</button>
+      <button id="settings" title="Open Token Coach settings">⚙ Settings</button>
+    </div>
+  </header>
+  <p class="mast-note muted">Usage in credits (1 credit = 1 AIU = $0.01) · context sizes are estimates (~4 chars ≈ 1 token).</p>
   ${body}
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();

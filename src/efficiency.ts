@@ -57,7 +57,7 @@ export interface EfficiencyScore {
   providerMisses: number;
   /** Total messages scored. */
   messageCount: number;
-  /** Only requests at or after this time were counted (0 = all time). */
+  /** Only requests at or after this time (and before `untilTs`, if given) were counted. 0 = all time. */
   sinceTs: number;
   /** The single biggest thing dragging the grade, human-readable. Undefined when nothing drags. */
   topDrag?: string;
@@ -139,7 +139,8 @@ const fmtMoney = (nano: number, usdPerAiu: number): string =>
 export function scoreMessages(
   messages: MessageGroup[],
   config: CoachConfig,
-  sinceTs = 0
+  sinceTs = 0,
+  untilTs = Infinity
 ): EfficiencyScore {
   const ttlMs = config.cacheIdleMinutes > 0 ? config.cacheIdleMinutes * 60_000 : Infinity;
 
@@ -171,7 +172,7 @@ export function scoreMessages(
       reqs.forEach((r, i) => {
         // Earlier requests still walk the chain (they are the baseline a later
         // request is compared with); only the window's requests are counted.
-        const inWindow = r.timestamp >= sinceTs;
+        const inWindow = r.timestamp >= sinceTs && r.timestamp < untilTs;
         if (inWindow) {
           totalCost += r.costNanoAiu;
           counted++;

@@ -504,7 +504,7 @@ export async function buildSessionExports(
         workspaceStorageId: path.basename(ws),
         workspaceFolder: folders.get(ws) ?? UNKNOWN,
         vscodeChatSessionId: chatIds.get(f.sessionId) ?? UNKNOWN,
-        title: data.titles[f.sessionId] ?? UNKNOWN,
+        title: chat?.title ?? UNKNOWN,
         startedAt: isoLocal(firstTs),
         endedAt: isoLocal(lastTs),
       },

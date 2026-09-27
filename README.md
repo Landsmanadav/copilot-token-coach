@@ -137,8 +137,9 @@ Higher-level views layered on top of the raw cost data:
 - **Proactive nudges** — a gentle, throttled notification (≤1 per 5 min) when a
   new message shows an actionable inefficiency (cache went cold from idle/size, or
   open files dominate context).
-- **Save / export** — *Token Coach: Export Report* creates a folder with the overall
-  Markdown report, one JSON + Markdown file per session (raw log counters under their own
+- **Save / export** — *Token Coach: Export Report* writes, with no dialog, a folder under the
+  extension's own storage (*Open Exports Folder* shows it) with the overall Markdown report
+  (by month, by day, from the logs), one JSON + Markdown file per session (raw log counters under their own
   names, derived values with formulas, `unknown` where the log is silent, the log line to
   verify each request, versions, coverage, billing reconciliation), and CSV tables;
   the extension also records a **daily efficiency trend** shown on the dashboard.

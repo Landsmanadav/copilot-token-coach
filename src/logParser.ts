@@ -1315,6 +1315,19 @@ export function analyzeUnusedToolTrend(data: ParsedData, threshold: number): Unu
  * first), with all the per-message rollups already computed by groupByMessage.
  * Chats are returned most-recently-active first.
  */
+/**
+ * Copilot's title helper sometimes answers with a refusal ("Sorry, I can't
+ * assist with that.") and stores it as the chat title. Treat that as no title,
+ * so the chat falls back to the first thing the user typed.
+ */
+function usableTitle(title: string | undefined): string | undefined {
+  const t = title?.trim();
+  if (!t || /^(sorry|i'm sorry|i am sorry|i can(no|')t)\b/i.test(t)) {
+    return undefined;
+  }
+  return t;
+}
+
 export function groupByChat(data: ParsedData): ChatGroup[] {
   const messages = groupByMessage(data);
 
@@ -1367,7 +1380,7 @@ export function groupByChat(data: ParsedData): ChatGroup[] {
 
     chats.push({
       sessionId,
-      title: data.titles[sessionId] || fallback,
+      title: usableTitle(data.titles[sessionId]) ?? fallback,
       messages: msgs,
       startTime: msgs[0].startTime,
       lastTime: msgs[msgs.length - 1].startTime,

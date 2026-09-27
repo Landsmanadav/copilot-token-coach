@@ -6,10 +6,15 @@
  * daily history trend the extension records over time.
  */
 
-import { ParsedData, groupByChat, analyzeToolInventory } from './logParser';
+import { ParsedData, MessageGroup, groupByChat, analyzeToolInventory } from './logParser';
 import { CoachConfig } from './coach';
-import { computeEfficiency, windowStart } from './efficiency';
+import { computeEfficiency, scoreMessages, windowStart } from './efficiency';
 import { formatCost, formatUsd, formatTokensCompact } from './dashboard';
+
+function localDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 /** One day's recorded headline numbers, for the efficiency/savings trend. */
 export interface DailySnapshot {
@@ -22,15 +27,10 @@ export interface DailySnapshot {
   totalTokens: number;
 }
 
-/** Build the full Markdown report string for the given data + history.
- *  Covers all Copilot chat/agent usage logged on this machine — the whole logged
- *  history, not a single calendar month (nothing resets at a month boundary). */
-export function buildMarkdownReport(
-  data: ParsedData,
-  config: CoachConfig,
-  history: DailySnapshot[],
-  generatedAt: Date
-): string {
+/** Build the full Markdown report. Covers every request still in the logs on
+ *  this machine; the daily and monthly tables are computed from the logs
+ *  themselves, so they reach back as far as the logs do. */
+export function buildMarkdownReport(data: ParsedData, config: CoachConfig, generatedAt: Date): string {
   const eff = computeEfficiency(data, config, windowStart(generatedAt.getTime()));
   const inv = analyzeToolInventory(data);
   const chats = groupByChat(data);
@@ -51,10 +51,30 @@ export function buildMarkdownReport(
   const L: string[] = [];
 
   L.push(`# Token Coach report`);
-  L.push(`_Generated ${generatedAt.toLocaleString()} · covers all Copilot chat/agent usage logged on this machine_`);
+  L.push(`_Generated ${generatedAt.toLocaleString()} · covers every Copilot chat/agent request still in the logs on this machine (Copilot keeps its newest 50 sessions by default)_`);
   L.push('');
 
   // Headline
+  // Point at the per-conversation files right away; they sit next to this report.
+  if (chats.length) {
+    L.push(`## Conversations`);
+    L.push('');
+    L.push(
+      `One file per conversation in the \`sessions\` folder next to this report: \`.md\` to read, \`.json\` for tools. ` +
+        `\`requests.csv\` and \`sessions.csv\` open in Excel.`
+    );
+    L.push('');
+    L.push(`| Started | Conversation | Messages | Requests | Cost | Details |`);
+    L.push(`| --- | --- | --: | --: | --: | --- |`);
+    for (const c of [...chats].sort((a, b) => b.startTime - a.startTime)) {
+      const title = c.title.replace(/\|/g, '\\|').replace(/\s+/g, ' ').slice(0, 60);
+      L.push(
+        `| ${localDay(new Date(c.startTime))} | ${title} | ${c.messages.length} | ${c.requestCount} | ${formatCost(c.totalCostNanoAiu)}${usd(c.totalCostNanoAiu)} | [open](sessions/${c.sessionId}.md) |`
+      );
+    }
+    L.push('');
+  }
+
   L.push(`## Summary`);
   L.push('');
   L.push(`| Metric | Value |`);
@@ -125,15 +145,61 @@ export function buildMarkdownReport(
     L.push('');
   }
 
-  // History trend
-  if (history.length) {
-    L.push(`## Daily trend`);
+  // Month and day tables, straight from the logs (local calendar days).
+  const days = new Map<string, { start: number; requests: number; tokens: number; cost: number }>();
+  const months = new Map<string, { requests: number; tokens: number; cost: number; days: number }>();
+  for (const r of data.requests) {
+    if (r.timestamp <= 0) {
+      continue;
+    }
+    const d = new Date(r.timestamp);
+    const key = localDay(d);
+    const day = days.get(key) ?? {
+      start: new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(),
+      requests: 0,
+      tokens: 0,
+      cost: 0,
+    };
+    day.requests++;
+    day.tokens += r.inputTokens + r.outputTokens;
+    day.cost += r.costNanoAiu;
+    days.set(key, day);
+  }
+  for (const [key, d] of days) {
+    const m = months.get(key.slice(0, 7)) ?? { requests: 0, tokens: 0, cost: 0, days: 0 };
+    m.requests += d.requests;
+    m.tokens += d.tokens;
+    m.cost += d.cost;
+    m.days++;
+    months.set(key.slice(0, 7), m);
+  }
+  if (months.size) {
+    L.push(`## By month`);
     L.push('');
-    L.push(`| Date | Grade | Score | Cost that day | Total tokens |`);
-    L.push(`| --- | --- | --: | --: | --: |`);
-    for (const h of history.slice(-30)) {
+    L.push(`| Month | Active days | Requests | Cost | Total tokens |`);
+    L.push(`| --- | --: | --: | --: | --: |`);
+    for (const [key, m] of [...months].sort((a, b) => b[0].localeCompare(a[0]))) {
       L.push(
-        `| ${h.date} | ${h.grade} | ${h.score} | ${formatCost(h.monthCostNanoAiu)}${usd(h.monthCostNanoAiu)} | ${formatTokensCompact(h.totalTokens)} |`
+        `| ${key} | ${m.days} | ${m.requests.toLocaleString()} | ${formatCost(m.cost)}${usd(m.cost)} | ${formatTokensCompact(m.tokens)} |`
+      );
+    }
+    L.push('');
+  }
+  if (days.size) {
+    const messages: MessageGroup[] = chats.flatMap((c) => c.messages);
+    L.push(`## By day`);
+    L.push('');
+    L.push(`Score = that day alone: 100 minus 2 points per 1% of the day's spend lost to avoidable cache misses.`);
+    L.push('');
+    L.push(`| Date | Requests | Cost | Lost to cache | Score | Total tokens |`);
+    L.push(`| --- | --: | --: | --: | --: | --: |`);
+    for (const [key, d] of [...days].sort((a, b) => b[0].localeCompare(a[0]))) {
+      const next = new Date(d.start);
+      next.setDate(next.getDate() + 1);
+      const e = scoreMessages(messages, config, d.start, next.getTime());
+      const lost = e.timingWasteNanoAiu + e.qualityWasteNanoAiu;
+      L.push(
+        `| ${key} | ${d.requests.toLocaleString()} | ${formatCost(d.cost)}${usd(d.cost)} | ${formatCost(lost)} | ${e.score} | ${formatTokensCompact(d.tokens)} |`
       );
     }
     L.push('');

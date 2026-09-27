@@ -4,6 +4,22 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-09-27
+
+### Changed — export
+- **No save dialog.** Export writes straight to Token Coach's own local folder (the extension's
+  global storage, `exports/token-coach-export-<date-time>`), opens `report.md`, and offers
+  **Open folder**. Never inside the open repo, never a synced Documents folder. The newest 20
+  exports are kept. New command: *Token Coach: Open Exports Folder*.
+- **The report opens with a Conversations list**: every conversation with date, messages,
+  requests, cost and an *open* link to its own file in `sessions/`. In 2.5 those per-conversation
+  files existed but nothing pointed to them.
+- **Readable titles.** When Copilot's title helper refused ("Sorry, I can't assist with that.")
+  and stored that as the title, the conversation now shows the first message you typed.
+- **The report reaches back as far as the logs do.** New *By month* and *By day* tables are built
+  from the logs themselves, with each day's cache-waste score. The old *Daily trend* table showed
+  only the last 30 daily snapshots, so a report looked like one month even with logs from June.
+
 ## [2.5.0] - 2026-09-27
 
 ### Added — per-session export (schema `token-coach.session/0.1`)

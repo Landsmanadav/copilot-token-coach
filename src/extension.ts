@@ -520,37 +520,8 @@ async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<vo
   await extensionContext.globalState.update(HISTORY_KEY, history);
 }
 
-/** Where exports go: `<extension global storage>/exports`. Set on activation. */
-let exportsDir: vscode.Uri | undefined;
-/** Exports kept; older ones are deleted (only Token Coach's own export folders). */
-const KEEP_EXPORTS = 20;
-
-async function pruneOldExports(): Promise<void> {
-  if (!exportsDir) {
-    return;
-  }
-  try {
-    const entries = await vscode.workspace.fs.readDirectory(exportsDir);
-    const ours = entries
-      .filter(([name, type]) => type === vscode.FileType.Directory && name.startsWith('token-coach-export-'))
-      .map(([name]) => name)
-      .sort()
-      .reverse();
-    for (const name of ours.slice(KEEP_EXPORTS)) {
-      await vscode.workspace.fs.delete(vscode.Uri.joinPath(exportsDir, name), { recursive: true });
-    }
-  } catch {
-    // Pruning is housekeeping; never fail an export over it.
-  }
-}
-
-async function openExportsFolder(): Promise<void> {
-  if (!exportsDir) {
-    return;
-  }
-  await vscode.workspace.fs.createDirectory(exportsDir);
-  await vscode.commands.executeCommand('revealFileInOS', exportsDir);
-}
+/** The folder the user last exported to, offered first next time. */
+const LAST_EXPORT_FOLDER_KEY = 'tokenCoach.lastExportFolder';
 
 /**
  * Export a folder: the overall Markdown report plus one JSON and
@@ -559,28 +530,56 @@ async function openExportsFolder(): Promise<void> {
  * extension's own storage, with no dialog.
  */
 async function exportReport(): Promise<void> {
+  try {
+    await runExport();
+  } catch (err) {
+    // Any failure must be visible; a silent no-op looks like a dead button.
+    vscode.window.showErrorMessage(`Token Coach: export failed — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function runExport(): Promise<void> {
+  // The user picks the folder first (reading big logs can take a while, and the
+  // dialog must not look like a dead button); the last choice is offered next time.
+  const last = extensionContext?.globalState.get<string>(LAST_EXPORT_FOLDER_KEY);
+  const picked = await vscode.window.showOpenDialog({
+    title: 'Token Coach export — choose where to create the export folder',
+    canSelectFolders: true,
+    canSelectFiles: false,
+    canSelectMany: false,
+    defaultUri: last ? vscode.Uri.parse(last) : vscode.workspace.workspaceFolders?.[0]?.uri,
+    openLabel: 'Export here',
+  });
+  if (!picked?.[0]) {
+    return;
+  }
+  await extensionContext?.globalState.update(LAST_EXPORT_FOLDER_KEY, picked[0].toString());
+
   const config = getCoachConfig();
-  const files = await findLogFiles(getOverridePath(), workspaceStorageBase);
-  const data = await loadAll(getOverridePath(), workspaceStorageBase);
+  const loaded = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Token Coach: reading Copilot logs…' },
+    async () => ({
+      files: await findLogFiles(getOverridePath(), workspaceStorageBase),
+      data: await loadAll(getOverridePath(), workspaceStorageBase),
+    })
+  );
+  const { files, data } = loaded;
   if (data.requests.length === 0) {
     vscode.window.showWarningMessage('Token Coach: no Copilot usage logged yet — nothing to export.');
     return;
   }
 
-  // A fixed, local folder: no save dialog, never inside the open repo, never a
-  // synced Documents folder. Each export is a new timestamped subfolder.
-  if (!exportsDir) {
-    vscode.window.showErrorMessage('Token Coach: export folder is not available.');
-    return;
-  }
   const now = new Date();
   const p2 = (n: number) => String(n).padStart(2, '0');
   const stamp = `${localDateKey(now)}-${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
-  const root = vscode.Uri.joinPath(exportsDir, `token-coach-export-${stamp}`);
+  const root = vscode.Uri.joinPath(picked[0], `token-coach-export-${stamp}`);
   const write = (uri: vscode.Uri, text: string) => vscode.workspace.fs.writeFile(uri, Buffer.from(text, 'utf8'));
 
   try {
-    const sessions = await buildSessionExports(files, data, config, extensionVersion, now);
+    const sessions = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Token Coach: building the export…' },
+      () => buildSessionExports(files, data, config, extensionVersion, now)
+    );
     const sessionsDir = vscode.Uri.joinPath(root, 'sessions');
     await vscode.workspace.fs.createDirectory(sessionsDir);
     for (const s of sessions) {
@@ -591,7 +590,6 @@ async function exportReport(): Promise<void> {
     await write(vscode.Uri.joinPath(root, 'requests.csv'), requestsCsv(sessions));
     await write(vscode.Uri.joinPath(root, 'sessions.csv'), sessionsCsv(sessions));
     await write(vscode.Uri.joinPath(root, 'report.md'), buildMarkdownReport(data, config, now));
-    await pruneOldExports();
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, 'report.md'));
     await vscode.window.showTextDocument(doc);
     const choice = await vscode.window.showInformationMessage(
@@ -667,7 +665,6 @@ function deriveWorkspaceStorageBase(context: vscode.ExtensionContext): string {
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   extensionVersion = String(context.extension.packageJSON.version ?? '');
-  exportsDir = vscode.Uri.joinPath(context.globalStorageUri, 'exports');
   setExtensionVersion(extensionVersion);
   workspaceStorageBase = deriveWorkspaceStorageBase(context);
   console.log('[Token Coach] workspaceStorage base:', workspaceStorageBase || '(derive failed; using OS defaults)');
@@ -680,7 +677,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('tokenCoach.showDashboard', () => void showDashboard()),
     vscode.commands.registerCommand('tokenCoach.refresh', () => void refresh()),
     vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport()),
-    vscode.commands.registerCommand('tokenCoach.openExportsFolder', () => void openExportsFolder()),
     vscode.commands.registerCommand('tokenCoach.enableLogging', () => void enableLogging()),
     // Open VS Code's Settings UI pre-filtered to this extension's settings.
     vscode.commands.registerCommand('tokenCoach.openSettings', () =>

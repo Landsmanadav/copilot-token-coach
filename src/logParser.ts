@@ -63,6 +63,8 @@ export interface LlmRequestRecord {
   attachments?: AttachmentInfo[];
   /** Absolute path of the source `main.jsonl`. */
   sourceFile: string;
+  /** 1-based line of this request in `sourceFile` — the evidence to verify it. */
+  logLine: number;
 }
 
 /** A single attached file (open editor) sent as context. */
@@ -785,7 +787,8 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
   const messageIdFor = () =>
     messageIndex >= 0 ? `${file.sessionId}:m${messageIndex}` : `${file.sessionId}:pre`;
 
-  for (const line of lines) {
+  for (let lineNo = 1; lineNo <= lines.length; lineNo++) {
+    const line = lines[lineNo - 1];
     const trimmed = line.trim();
     if (trimmed.length === 0) {
       continue;
@@ -889,6 +892,7 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
         contextBreakdown: breakdown.length ? breakdown : undefined,
         attachments: attachments.length ? attachments : undefined,
         sourceFile: file.filePath,
+        logLine: lineNo,
       });
       index++;
     }

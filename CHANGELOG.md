@@ -4,6 +4,14 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-09-27
+
+### Fixed
+- **Export works again, with a folder picker.** 2.6.0's dialog-free export into the extension's
+  storage did nothing on some machines. Export asks for the folder first again, remembers the
+  last choice, shows progress while reading logs and building files, and reports any failure
+  as an error instead of doing nothing. *Open Exports Folder* is removed.
+
 ## [2.6.0] - 2026-09-27
 
 ### Changed — export

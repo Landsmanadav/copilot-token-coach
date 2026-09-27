@@ -4,6 +4,31 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-09-27
+
+### Added — per-session export (schema `token-coach.session/0.1`)
+- **Export writes a folder**, not one file: `report.md` (the overall report), and per session
+  `sessions/<id>.json` + `sessions/<id>.md`, plus `requests.csv` and `sessions.csv`.
+- **Raw first.** Every numeric field on each `llm_request` line is copied as emitted, under the
+  log's own names. Derived values sit apart and name their formula. Missing values are
+  `"unknown"`, never zero; options that were logged but not set are `"not sent"`.
+- **Per request:** purpose (`debugName`), model, status, reasoning effort / thinking budget,
+  prompt size and share of the model's max prompt, long-context flag, context sources,
+  attachments, and the log file + line to verify it.
+- **Billing reconciliation:** credits and dollars from `copilotUsageNanoAiu`, next to credits
+  recomputed from the session's own model catalog (`models.json` prices), and the gap. Two
+  corrections, measured on 282 requests, close the gap to 0.025%: Claude bills new prompt
+  tokens as cache writes (1.25× input), and the catalog rounds cache prices to whole units
+  (gpt-5-mini lists 2, bills 2.5).
+- **Per session:** VS Code and Copilot Chat versions, workspace folder, the VS Code chat session
+  that mentions this log, coverage (which artifacts exist, unreadable lines, cut-off last line,
+  what the logs never carry), child sessions (title helpers, subagents) with their own cost,
+  the thresholds in force, and the cache-waste score marked as a heuristic.
+
+### Changed
+- **The dashboard tab title shows this month's spend**, not everything ever logged. The month
+  starts like Copilot billing does: 00:00 UTC on the 1st.
+
 ## [2.4.0] - 2026-09-27
 
 ### Changed — a grade that works on real work

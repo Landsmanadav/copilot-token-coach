@@ -2377,7 +2377,7 @@ export function renderHtml(
     </div>
     <div class="mast-actions">
       <button id="refresh" title="Re-scan logs">↻ Refresh</button>
-      <button id="export" title="Save a Markdown report">⤓ Export</button>
+      <button id="export" title="Export a folder: report, one JSON + Markdown per session, CSV tables">⤓ Export</button>
       <button id="settings" title="Open Token Coach settings">⚙ Settings</button>
     </div>
   </header>
@@ -2619,15 +2619,20 @@ export class DashboardPanel {
   update(data: ParsedData, config: CoachConfig, history: DailySnapshot[] = [], loggingEnabled = true): void {
     this.loggingEnabled = loggingEnabled;
 
-    // Surface "how much you've used" in the editor tab title (no token count).
+    // The editor tab title shows this month's spend. The month starts the way
+    // Copilot billing does: 00:00 UTC on the 1st.
+    const now = new Date();
+    const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
     let cost = 0;
     for (const r of data.requests) {
-      cost += r.costNanoAiu;
+      if (r.timestamp >= monthStart) {
+        cost += r.costNanoAiu;
+      }
     }
     this.panel.title =
       config.usdPerAiu > 0
-        ? `Token Coach · ${formatUsd(cost, config.usdPerAiu)} · ${formatCredits(cost)}`
-        : `Token Coach · ${formatCredits(cost)}`;
+        ? `Token Coach · ${formatUsd(cost, config.usdPerAiu)} this month · ${formatCredits(cost)}`
+        : `Token Coach · ${formatCredits(cost)} this month`;
 
     const nonce = makeNonce();
     this.panel.webview.html = renderHtml(

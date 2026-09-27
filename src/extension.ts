@@ -12,6 +12,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import {
   loadAll,
+  findLogFiles,
   findExistingStorageBases,
   groupByChat,
   ChatGroup,
@@ -22,6 +23,7 @@ import {
 import { analyzeRecord, analyzeMessageDrivers, CoachConfig, CoachWarning, DEFAULT_COACH_CONFIG } from './coach';
 import { computeEfficiency, EfficiencyScore, windowStart } from './efficiency';
 import { buildMarkdownReport, DailySnapshot } from './report';
+import { buildSessionExports, requestsCsv, sessionMarkdown, sessionsCsv } from './sessionExport';
 import {
   DashboardPanel,
   formatCost,
@@ -75,6 +77,8 @@ let nudgePrimed = false;
 let lastNudgeMs = 0;
 /** Minimum gap between inefficiency nudges, so they coach rather than nag. */
 const NUDGE_COOLDOWN_MS = 5 * 60 * 1000;
+/** This build's version, stamped on every export. */
+let extensionVersion = '';
 /** Popups close themselves after this many seconds so they never pile up. */
 const NOTIFICATION_SECONDS = 3;
 /** Backup refresh on top of the file watcher. */
@@ -516,36 +520,57 @@ async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<vo
   await extensionContext.globalState.update(HISTORY_KEY, history);
 }
 
-/** Build a Markdown report and let the user save it, then open it. */
+/**
+ * Export a folder the user picks: the overall Markdown report plus one JSON and
+ * one Markdown file per session, and CSV tables across sessions. Read-only on
+ * the Copilot logs; every write goes into a new, timestamped folder.
+ */
 async function exportReport(): Promise<void> {
   const config = getCoachConfig();
+  const files = await findLogFiles(getOverridePath(), workspaceStorageBase);
   const data = await loadAll(getOverridePath(), workspaceStorageBase);
   if (data.requests.length === 0) {
     vscode.window.showWarningMessage('Token Coach: no Copilot usage logged yet — nothing to export.');
     return;
   }
-  const md = buildMarkdownReport(data, config, getHistory(), new Date());
 
-  const defaultName = `token-coach-report-${localDateKey(new Date())}.md`;
-  const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
-  const defaultUri = folder ? vscode.Uri.joinPath(folder, defaultName) : vscode.Uri.file(defaultName);
-  const target = await vscode.window.showSaveDialog({
-    title: 'Export Token Coach report',
-    defaultUri,
-    filters: { Markdown: ['md'], 'All files': ['*'] },
+  const picked = await vscode.window.showOpenDialog({
+    title: 'Export Token Coach report — choose where to create the export folder',
+    canSelectFolders: true,
+    canSelectFiles: false,
+    canSelectMany: false,
+    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+    openLabel: 'Export here',
   });
-  if (!target) {
+  if (!picked?.[0]) {
     return;
   }
+
+  const now = new Date();
+  const stamp = `${localDateKey(now)}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+  const root = vscode.Uri.joinPath(picked[0], `token-coach-export-${stamp}`);
+  const write = (uri: vscode.Uri, text: string) => vscode.workspace.fs.writeFile(uri, Buffer.from(text, 'utf8'));
 
   try {
-    await vscode.workspace.fs.writeFile(target, Buffer.from(md, 'utf8'));
+    const sessions = await buildSessionExports(files, data, config, extensionVersion, now);
+    const sessionsDir = vscode.Uri.joinPath(root, 'sessions');
+    await vscode.workspace.fs.createDirectory(sessionsDir);
+    for (const s of sessions) {
+      const id = s.session.debugSessionId;
+      await write(vscode.Uri.joinPath(sessionsDir, `${id}.json`), JSON.stringify(s, null, 2));
+      await write(vscode.Uri.joinPath(sessionsDir, `${id}.md`), sessionMarkdown(s));
+    }
+    await write(vscode.Uri.joinPath(root, 'requests.csv'), requestsCsv(sessions));
+    await write(vscode.Uri.joinPath(root, 'sessions.csv'), sessionsCsv(sessions));
+    await write(vscode.Uri.joinPath(root, 'report.md'), buildMarkdownReport(data, config, getHistory(), now));
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, 'report.md'));
+    await vscode.window.showTextDocument(doc);
+    vscode.window.showInformationMessage(
+      `Token Coach: exported ${sessions.length} session${sessions.length === 1 ? '' : 's'} to ${root.fsPath}`
+    );
   } catch (err) {
-    vscode.window.showErrorMessage(`Token Coach: could not write the report — ${String(err)}`);
-    return;
+    vscode.window.showErrorMessage(`Token Coach: could not write the export — ${String(err)}`);
   }
-  const doc = await vscode.workspace.openTextDocument(target);
-  await vscode.window.showTextDocument(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -608,7 +633,8 @@ function deriveWorkspaceStorageBase(context: vscode.ExtensionContext): string {
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
-  setExtensionVersion(String(context.extension.packageJSON.version ?? ''));
+  extensionVersion = String(context.extension.packageJSON.version ?? '');
+  setExtensionVersion(extensionVersion);
   workspaceStorageBase = deriveWorkspaceStorageBase(context);
   console.log('[Token Coach] workspaceStorage base:', workspaceStorageBase || '(derive failed; using OS defaults)');
 

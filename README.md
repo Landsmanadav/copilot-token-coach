@@ -137,8 +137,10 @@ Higher-level views layered on top of the raw cost data:
 - **Proactive nudges** — a gentle, throttled notification (≤1 per 5 min) when a
   new message shows an actionable inefficiency (cache went cold from idle/size, or
   open files dominate context).
-- **Save / export** — *Token Coach: Export Report* writes a Markdown snapshot
-  (summary, efficiency, model spend, unused tools, top chats, trend) you can keep;
+- **Save / export** — *Token Coach: Export Report* creates a folder with the overall
+  Markdown report, one JSON + Markdown file per session (raw log counters under their own
+  names, derived values with formulas, `unknown` where the log is silent, the log line to
+  verify each request, versions, coverage, billing reconciliation), and CSV tables;
   the extension also records a **daily efficiency trend** shown on the dashboard.
 - **Local logs only — nothing leaves your machine** — every figure comes
   straight from the Copilot debug logs on this machine. Those logs are a
@@ -290,7 +292,8 @@ token-coach/
 │   ├── coach.ts         # rules engine
 │   ├── efficiency.ts    # A–F efficiency grade (all-time + per-chat)
 │   ├── dashboard.ts     # webview HTML + update logic
-│   └── report.ts        # Markdown export + daily-trend snapshot type
+│   ├── report.ts        # overall Markdown report + daily-trend snapshot type
+│   └── sessionExport.ts # per-session JSON / Markdown / CSV export
 └── README.md
 ```
 

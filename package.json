@@ -2,7 +2,7 @@
   "name": "token-coach",
   "displayName": "Token Coach",
   "description": "Reads GitHub Copilot's local debug logs and coaches you toward cheaper token usage by surfacing cost (NanoAiu) and cache hit rates.",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "publisher": "NadavLAN",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -55,7 +55,7 @@
       },
       {
         "command": "tokenCoach.exportReport",
-        "title": "Token Coach: Export Report (Markdown)",
+        "title": "Token Coach: Export Report (per session JSON, Markdown, CSV)",
         "icon": "$(save)"
       },
       {

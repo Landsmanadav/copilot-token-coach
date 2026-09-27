@@ -225,7 +225,7 @@ export interface MessageGroup {
 }
 
 /** A discovered log file plus its derived session id. */
-interface LogFile {
+export interface LogFile {
   filePath: string;
   sessionId: string;
 }

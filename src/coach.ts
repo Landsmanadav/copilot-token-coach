@@ -88,6 +88,16 @@ export const DEFAULT_COACH_CONFIG: CoachConfig = {
   unusedToolMinChats: 3,
 };
 
+/** Version of the tip thresholds, shown on every tip so none reads as a universal fact. */
+export const HEURISTICS_VERSION = 'v2.7';
+
+/** "(Token Coach heuristic v2.7: <rule>)" — marks a threshold judgement as such. */
+function heur(rule: string): string {
+  return `(Token Coach heuristic ${HEURISTICS_VERSION}: ${rule})`;
+}
+
+const fmtCredits = (nano: number) => (nano / 1e9).toFixed(nano >= 10e9 ? 0 : 2);
+
 /** Rough chars→tokens estimate. Context payload sizes are measured in chars. */
 const CHARS_PER_TOKEN = 4;
 
@@ -118,7 +128,9 @@ export function analyzeRecord(record: LlmRequestRecord, config: CoachConfig): Co
     warnings.push({
       rule: 'expensive-request',
       level: 'error',
-      message: 'Expensive request — consider splitting the task into smaller, focused steps.',
+      message:
+        `Expensive request: ${fmtCredits(record.costNanoAiu)} credits ${heur(`above ${fmtCredits(config.costWarnThreshold)}`)}. ` +
+        'Splitting the task into smaller, focused steps usually costs less.',
     });
   }
 
@@ -132,7 +144,9 @@ export function analyzeRecord(record: LlmRequestRecord, config: CoachConfig): Co
     warnings.push({
       rule: 'large-input',
       level: 'warning',
-      message: 'Large input — close irrelevant files/tabs so less context is sent each turn.',
+      message:
+        `Large prompt: ${record.inputTokens.toLocaleString()} tokens ${heur(`above ${config.inputWarnThreshold.toLocaleString()}`)}. ` +
+        'Closing unrelated files/tabs sends less context each turn.',
     });
   }
 
@@ -147,7 +161,10 @@ export function analyzeRecord(record: LlmRequestRecord, config: CoachConfig): Co
     warnings.push({
       rule: 'tiny-output',
       level: 'info',
-      message: 'Tiny output for a huge input — did this really need agent mode / full context?',
+      message:
+        `Tiny output for a big prompt: ${record.inputTokens.toLocaleString()} in, ${record.outputTokens.toLocaleString()} out ` +
+        `(ratio ${Math.round(record.inputTokens / record.outputTokens).toLocaleString()} ${heur(`above ${config.ioRatioThreshold.toLocaleString()}`)}). ` +
+        'Worth asking whether this needed agent mode / full context.',
     });
   }
 
@@ -187,10 +204,11 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
   // would average a cold start away.
   const isFirstInChat = group.chatMessageIndex === 0;
   const first = group.requests[0];
+  const firstShare = first && first.inputTokens > 0 ? first.cachedTokens / first.inputTokens : 1;
   const cacheLow =
     first !== undefined &&
     first.inputTokens > config.lowCacheMinInputTokens &&
-    first.cachedTokens / first.inputTokens < config.lowCacheRateThreshold;
+    firstShare < config.lowCacheRateThreshold;
 
   // Did enough idle time pass before this message to expire the prompt cache?
   // We have the real cache numbers, so we only blame idle when cache *also*
@@ -206,9 +224,10 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       rule: 'cache-expired-idle',
       level: 'warning',
       message:
-        `Cache went cold after a ~${formatGapMinutes(mins)} pause — past the ~5 min prompt-cache window, so ` +
-        `the cached context expired and was re-billed at the full (much higher) input rate this turn. ` +
-        `Keep a thread warm by sending the next message within ~5 min, or batch related questions together.`,
+        `Cache reuse on this message's first call was ${Math.round(firstShare * 100)}% after a ~${formatGapMinutes(mins)} pause ` +
+        `${heur(`pause ≥ ${config.cacheIdleMinutes} min and reuse < ${Math.round(config.lowCacheRateThreshold * 100)}%`)}. ` +
+        `Likely cause: the prompt cache expired (typically ~5 min), so the history was billed at the full input rate. ` +
+        `After a long break, a new chat is often cheaper than continuing a long one.`,
     });
   } else if (cacheLow && !isFirstInChat) {
     // Claude's cache is deterministic, so a warm-window miss means the context
@@ -217,9 +236,9 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       rule: 'low-cache-hit',
       level: /claude|anthropic/i.test(first.model) ? 'warning' : 'info',
       message:
-        'Low cache reuse mid-chat — the conversation likely outgrew the cache window or its ' +
-        'context changed between turns. If this is a new/unrelated task, a fresh focused chat ' +
-        'can be cheaper than continuing this large one.',
+        `Cache reuse on this message's first call was ${Math.round(firstShare * 100)}% of ${first.inputTokens.toLocaleString()} tokens ` +
+        `${heur(`reuse < ${Math.round(config.lowCacheRateThreshold * 100)}% on prompts > ${config.lowCacheMinInputTokens.toLocaleString()}`)}, with no long pause before it. ` +
+        'Possible causes: the context changed between turns, or the model changed. If this is a new task, a fresh chat can be cheaper.',
     });
   }
 
@@ -246,7 +265,8 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       level: 'warning',
       message:
         `Open/attached files are ~${share}% of the logged context` +
-        `${n ? ` (${n} file${n === 1 ? '' : 's'}, ≈${Math.round(attachTokens).toLocaleString()} tok)` : ''} — close unused editors/tabs.`,
+        `${n ? ` (${n} file${n === 1 ? '' : 's'}, ≈${Math.round(attachTokens).toLocaleString()} tok)` : ''} ` +
+        `${heur(`above ${Math.round(config.attachmentShareWarn * 100)}%`)}. Closing unused editors/tabs sends less.`,
     });
   }
 
@@ -265,7 +285,8 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       rule: 'premium-overkill',
       level: 'info',
       message:
-        `Small, billed turn on ${model} (≈${Math.round(group.totalInputTokens / 1000)}k tok, no tools) — ` +
+        `Small, billed turn on ${model} (≈${Math.round(group.totalInputTokens / 1000)}k tok, no tools, ` +
+        `${heur(`under ${(PREMIUM_TRIVIAL_MAX_INPUT / 1000).toFixed(0)}k tokens, single turn`)}) — ` +
         `base models (e.g. GPT-4.1 / GPT-4o) are included in your plan. Pick one from the model dropdown for ` +
         `quick edits & questions to save premium budget.`,
     });
@@ -279,7 +300,7 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
       level: 'info',
       message:
         `Tool "${slow.name}" took ${(slow.durationMs / 1000).toFixed(1)}s across ` +
-        `${slow.calls} call${slow.calls === 1 ? '' : 's'} — heavy tool use lengthens turns and grows context.`,
+        `${slow.calls} call${slow.calls === 1 ? '' : 's'} ${heur(`above ${(config.slowToolWarnMs / 1000).toFixed(0)}s`)}.`,
     });
   }
 

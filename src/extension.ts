@@ -23,7 +23,7 @@ import {
 import { analyzeRecord, analyzeMessageDrivers, CoachConfig, CoachWarning, DEFAULT_COACH_CONFIG } from './coach';
 import { computeEfficiency, EfficiencyScore, windowStart } from './efficiency';
 import { buildMarkdownReport, DailySnapshot } from './report';
-import { buildSessionExports, requestsCsv, sessionMarkdown, sessionsCsv } from './sessionExport';
+import { buildSessionExports, eventsCsv, requestsCsv, sessionMarkdown, sessionsCsv, toolCallsCsv, toolsCsv } from './sessionExport';
 import {
   DashboardPanel,
   formatCost,
@@ -520,6 +520,51 @@ async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<vo
   await extensionContext.globalState.update(HISTORY_KEY, history);
 }
 
+/** Copilot's OpenTelemetry JSON-lines file, when the user has turned it on. */
+function otelOutfile(): string | undefined {
+  const f = vscode.workspace.getConfiguration('github.copilot.chat.otel').get<string>('outfile', '');
+  return f && f.trim() ? f.trim() : undefined;
+}
+
+/**
+ * Turn on Copilot's OpenTelemetry file export (without message content) so the
+ * export can add cache-write and reasoning tokens, which the debug log omits.
+ */
+async function enableCacheWriteCapture(): Promise<void> {
+  const existing = otelOutfile();
+  if (existing) {
+    vscode.window.showInformationMessage(`Token Coach: Copilot already writes OpenTelemetry to ${existing}. The next export will read it.`);
+    return;
+  }
+  if (!extensionContext) {
+    return;
+  }
+  const choice = await vscode.window.showInformationMessage(
+    'Token Coach: turn on Copilot\'s OpenTelemetry file export? It records token counts per request (including cache writes and reasoning tokens) ' +
+      'to a local file. Prompts and responses are NOT recorded. It changes your Copilot settings; turn it off in Settings any time.',
+    { modal: true },
+    'Turn on'
+  );
+  if (choice !== 'Turn on') {
+    return;
+  }
+  const dir = vscode.Uri.joinPath(extensionContext.globalStorageUri, 'otel');
+  await vscode.workspace.fs.createDirectory(dir);
+  const file = vscode.Uri.joinPath(dir, 'copilot-otel.jsonl').fsPath;
+  const cfg = vscode.workspace.getConfiguration('github.copilot.chat.otel');
+  try {
+    await cfg.update('outfile', file, vscode.ConfigurationTarget.Global);
+    await cfg.update('enabled', true, vscode.ConfigurationTarget.Global);
+    await cfg.update('captureContent', false, vscode.ConfigurationTarget.Global);
+  } catch (err) {
+    vscode.window.showErrorMessage(`Token Coach: could not change Copilot's OpenTelemetry settings — ${String(err)}`);
+    return;
+  }
+  vscode.window.showInformationMessage(
+    `Token Coach: Copilot will write token counts to ${file}. Only new requests are covered; exports include cache writes from now on.`
+  );
+}
+
 /** The folder the user last exported to, offered first next time. */
 const LAST_EXPORT_FOLDER_KEY = 'tokenCoach.lastExportFolder';
 
@@ -578,7 +623,7 @@ async function runExport(): Promise<void> {
   try {
     const sessions = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Token Coach: building the export…' },
-      () => buildSessionExports(files, data, config, extensionVersion, now)
+      () => buildSessionExports(files, data, config, extensionVersion, now, { otelFile: otelOutfile() })
     );
     const sessionsDir = vscode.Uri.joinPath(root, 'sessions');
     await vscode.workspace.fs.createDirectory(sessionsDir);
@@ -589,6 +634,9 @@ async function runExport(): Promise<void> {
     }
     await write(vscode.Uri.joinPath(root, 'requests.csv'), requestsCsv(sessions));
     await write(vscode.Uri.joinPath(root, 'sessions.csv'), sessionsCsv(sessions));
+    await write(vscode.Uri.joinPath(root, 'events.csv'), eventsCsv(sessions));
+    await write(vscode.Uri.joinPath(root, 'tools.csv'), toolsCsv(sessions));
+    await write(vscode.Uri.joinPath(root, 'tool-calls.csv'), toolCallsCsv(sessions));
     await write(vscode.Uri.joinPath(root, 'report.md'), buildMarkdownReport(data, config, now));
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, 'report.md'));
     await vscode.window.showTextDocument(doc);
@@ -677,6 +725,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('tokenCoach.showDashboard', () => void showDashboard()),
     vscode.commands.registerCommand('tokenCoach.refresh', () => void refresh()),
     vscode.commands.registerCommand('tokenCoach.exportReport', () => void exportReport()),
+    vscode.commands.registerCommand('tokenCoach.enableCacheWriteCapture', () => void enableCacheWriteCapture()),
     vscode.commands.registerCommand('tokenCoach.enableLogging', () => void enableLogging()),
     // Open VS Code's Settings UI pre-filtered to this extension's settings.
     vscode.commands.registerCommand('tokenCoach.openSettings', () =>

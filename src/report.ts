@@ -10,6 +10,7 @@ import { ParsedData, MessageGroup, groupByChat, analyzeToolInventory } from './l
 import { CoachConfig } from './coach';
 import { computeEfficiency, scoreMessages, windowStart } from './efficiency';
 import { formatCost, formatUsd, formatTokensCompact } from './dashboard';
+import { durationBucket, UNKNOWN } from './signals';
 
 function localDay(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -61,7 +62,7 @@ export function buildMarkdownReport(data: ParsedData, config: CoachConfig, gener
     L.push('');
     L.push(
       `One file per conversation in the \`sessions\` folder next to this report: \`.md\` to read, \`.json\` for tools. ` +
-        `\`requests.csv\` and \`sessions.csv\` open in Excel.`
+        `\`sessions.csv\`, \`requests.csv\`, \`events.csv\` (changes during conversations) and \`tools.csv\` open in Excel.`
     );
     L.push('');
     L.push(`| Started | Conversation | Messages | Requests | Cost | Details |`);
@@ -182,6 +183,34 @@ export function buildMarkdownReport(data: ParsedData, config: CoachConfig, gener
       L.push(
         `| ${key} | ${m.days} | ${m.requests.toLocaleString()} | ${formatCost(m.cost)}${usd(m.cost)} | ${formatTokensCompact(m.tokens)} |`
       );
+    }
+    L.push('');
+  }
+  // By duration: how long conversations ran (first to last model call).
+  if (chats.length) {
+    const buckets = new Map<string, { chats: number; requests: number; cost: number }>();
+    const order = ['under 10 min', '10–60 min', '1–4 h', 'over 4 h'];
+    for (const c of chats) {
+      const first = Math.min(...c.messages.flatMap((m) => m.requests.map((r) => r.timestamp)));
+      const last = Math.max(...c.messages.flatMap((m) => m.requests.map((r) => r.timestamp + r.durationMs)));
+      const b = durationBucket(Number.isFinite(first) && Number.isFinite(last) ? (last - first) / 60000 : UNKNOWN);
+      const e = buckets.get(b) ?? { chats: 0, requests: 0, cost: 0 };
+      e.chats++;
+      e.requests += c.requestCount;
+      e.cost += c.totalCostNanoAiu;
+      buckets.set(b, e);
+    }
+    L.push(`## By conversation length`);
+    L.push('');
+    L.push(`Wall time from a conversation's first to last model call. Context, not effort: a chat left open overnight counts as long.`);
+    L.push('');
+    L.push(`| Length | Conversations | Requests | Cost | Avg cost per conversation |`);
+    L.push(`| --- | --: | --: | --: | --: |`);
+    for (const k of [...order, UNKNOWN]) {
+      const e = buckets.get(k);
+      if (e) {
+        L.push(`| ${k} | ${e.chats} | ${e.requests.toLocaleString()} | ${formatCost(e.cost)}${usd(e.cost)} | ${formatCost(e.cost / e.chats)} |`);
+      }
     }
     L.push('');
   }

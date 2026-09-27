@@ -4,6 +4,54 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-09-27
+
+Implements the rest of the team's signal request v0.1. Schema `token-coach.session/0.2`.
+
+### Added — per-conversation export
+- **Timeline of changes** (`events.csv` and each conversation file): model switches, reasoning
+  changes, tool-catalog changes, system-prompt changes, gaps of 60 s or more between model calls,
+  compaction calls and sharp prompt drops, each with prompt size and cache share on both sides.
+  Labelled correlation, not cause; gaps make no fixed cache-TTL claim.
+- **Model selection**: the model picked in VS Code for each message (from the VS Code chat file,
+  matched by time) vs the model that answered: auto, manual, byok or other vendor.
+- **Tools and MCP** (`tools.csv`): per tool calls, failures, median / p95 / max time and origin;
+  available vs used tools; retry chains (same tool and arguments with a failure); repeated reads;
+  longest failure run. MCP tools map to servers exactly from VS Code's `mcp.json` (user and
+  workspace), else by VS Code's naming rule, and say which.
+- **Fingerprints**: system prompt and tool catalog size and hash per request.
+- **Compaction**: Copilot's summarization calls with prompt size before and after and tokens freed.
+- **Workspace**: folder, git branch, HEAD and remote (credentials stripped, read at export time),
+  and a heuristic context-acquisition mode (repository-backed, task-scoped bundle, mixed, unknown).
+- **Duration**: wall minutes, a length bucket, requests per user message; *By conversation length*
+  table in the report.
+- **Cache-write and reasoning tokens** from Copilot's OpenTelemetry file, joined on the response id.
+  New command *Capture Cache-Write Tokens* turns on the file export (no prompt content).
+- **Every tool call** with its log line, status, duration and an arguments fingerprint
+  (`tool-calls.csv`), so every tool aggregate can be checked line by line.
+- **Child sessions** (title helpers, subagents) with where they were spawned and a total that
+  includes them; attachments carry a path hash so a shared export can drop the paths.
+- **A heuristics block** in every conversation file: the heuristics version, every threshold and
+  pattern that decides a heuristic field, and the TTL the score assumes.
+
+### Fixed (from the release review)
+- Conversation duration counted Copilot's discovery events, which can sit hours away from the
+  chat; 27 of 39 test conversations were inflated (e.g. 1,283 min for a 1-minute chat). It now
+  spans only the conversation's own events.
+- Tool "median" was the lower middle value for an even number of calls; now a true median.
+- The model picked in VS Code is matched by the text typed first, then by time (the chat file
+  and the log can be stamped minutes apart).
+- A bare `null` line in a log no longer aborts the export; context and attachments join on the
+  log line, not timestamp + tokens; git worktrees and UNC workspace paths are read correctly;
+  missing values are `unknown` in every CSV column, never blank.
+
+### Changed — dashboard
+- **Tips show the measurement and the rule**: every tip carries the measured value and
+  "(Token Coach heuristic v2.7: …)", and cache tips name the likely cause instead of asserting it.
+- **Evidence link**: every request row has a *line N* chip that opens the Copilot log at that line.
+- **Refreshed design**: Today and Wasted lead at double width on a 4-column grid, softer surfaces,
+  sentence-case labels, a primary Export button.
+
 ## [2.6.1] - 2026-09-27
 
 ### Fixed

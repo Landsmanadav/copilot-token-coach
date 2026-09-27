@@ -21,11 +21,36 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { LogFile, ParsedData, groupByChat } from './logParser';
 import { CoachConfig } from './coach';
-import { scoreMessages } from './efficiency';
+import { MIN_CACHEABLE_TOKENS, MISS_BELOW, POINTS_PER_WASTE_PCT, scoreMessages } from './efficiency';
+import { HEURISTICS_VERSION } from './coach';
+import {
+  ChatSelection,
+  GitInfo,
+  RawRequest,
+  RawToolCall,
+  SessionSignals,
+  SidecarInfo,
+  COMPACTION_PURPOSE,
+  CONTEXT_DROP_MIN_TOKENS,
+  CONTEXT_DROP_SHARE,
+  IDLE_GAP_SECONDS,
+  READ_TOOL,
+  UTILITY_PURPOSE,
+  computeSignals,
+  shortHash,
+  configuredMcpServers,
+  folderPathFromUri,
+  readChatSelections,
+  readGit,
+  readOtelUsage,
+  readSidecar,
+  selectionFor,
+  selectionMode,
+} from './signals';
 
 const fsp = fs.promises;
 
-export const EXPORT_SCHEMA = 'token-coach.session/0.1';
+export const EXPORT_SCHEMA = 'token-coach.session/0.2';
 const UNKNOWN = 'unknown' as const;
 type Unknown = typeof UNKNOWN;
 /** The request carried its options, and this one wasn't among them. */
@@ -59,6 +84,17 @@ export interface RequestExport {
   /** raw: every numeric attr on the log line, names untouched. */
   raw: Record<string, number>;
   /** raw: the reasoning / thinking settings sent with the request. */
+  /** derived: which user message (0-based) this request served. */
+  messageIndex: number;
+  /** The model the user picked for this message (VS Code chat file) vs the model that answered. */
+  selection: { selected: string | Unknown; mode: string };
+  /** The fixed prefix sent with the request: system prompt and tool catalog, with fingerprints. */
+  prefix: {
+    systemPrompt: { file: string | Unknown; chars: number | Unknown; hash: string | Unknown };
+    tools: { file: string | Unknown; count: number | Unknown; mcpCount: number | Unknown; chars: number | Unknown; hash: string | Unknown };
+  };
+  /** From Copilot's OpenTelemetry file, joined on the response id. Unknown when OTel is off. */
+  otel: { cacheCreationInputTokens: number | Unknown; reasoningTokens: number | Unknown };
   reasoning: {
     effort: string | Unknown | NotSent;
     thinkingBudgetTokens: number | Unknown | NotSent;
@@ -79,7 +115,8 @@ export interface RequestExport {
     longContext: boolean | Unknown;
     /** Character counts by source; estimates, since the log measures chars. */
     contextSources: { source: string; chars: number }[] | Unknown;
-    attachments: { path: string; chars: number }[] | Unknown;
+    /** path can be dropped for sharing; pathHash still identifies repeats of the same file. */
+    attachments: { path: string; pathHash: string; chars: number }[] | Unknown;
   };
 }
 
@@ -87,6 +124,10 @@ export interface ChildSessionExport {
   id: string;
   label: string | Unknown;
   file: string;
+  /** Where the parent log references this child, and the user message it belongs to. */
+  spawnedAt: string | Unknown;
+  spawnedAtLine: number;
+  parentMessageIndex: number | Unknown;
   requests: number;
   credits: number;
   inputTokens: number;
@@ -119,6 +160,10 @@ export interface SessionExport {
     notInLogs: string[];
   };
   thresholds: Record<string, number>;
+  /** Every rule that decides a heuristic field, with its version. */
+  heuristics: Record<string, string | number>;
+  /** Every tool call, with its log line — the evidence behind the tool aggregates. */
+  toolCalls: { at: string; line: number; name: string; status: string; durationMs: number; argsFingerprint: string; target: string | Unknown; messageIndex: number }[];
   pricing: { usdPerCredit: number; formula: string; catalogFormula: string; catalogFormulaVerifiedOn: string };
   totals: {
     userMessages: number;
@@ -132,7 +177,12 @@ export interface SessionExport {
     reconciliationDeltaCredits: number | Unknown;
     peakPromptTokens: number;
     childSessionCredits: number;
+    /** This session plus its child sessions (titles, subagents). */
+    creditsIncludingChildren: number;
   };
+  workspace: GitInfo & { folder: string | Unknown; mcpConfigFiles: string[] };
+  otelFile: string;
+  signals: SessionSignals;
   /** heuristic: the Token Coach grade for this session alone. */
   cacheWaste: { score: number; idlePauseCredits: number; idlePauses: number; breakCredits: number; breaks: number };
   childSessions: ChildSessionExport[];
@@ -255,8 +305,8 @@ function isLongContext(c: CatalogEntry, input: number): boolean {
 }
 
 /** Map each debug session id in a workspace to the VS Code chat file that mentions it. */
-async function chatFileIndex(workspaceDir: string, debugIds: string[]): Promise<Map<string, string>> {
-  const found = new Map<string, string>();
+async function chatFileIndex(workspaceDir: string, debugIds: string[]): Promise<Map<string, { id: string; file: string }>> {
+  const found = new Map<string, { id: string; file: string }>();
   const dir = path.join(workspaceDir, 'chatSessions');
   for (const name of await listDir(dir)) {
     let text: string;
@@ -267,7 +317,7 @@ async function chatFileIndex(workspaceDir: string, debugIds: string[]): Promise<
     }
     for (const id of debugIds) {
       if (!found.has(id) && text.includes(id)) {
-        found.set(id, name.replace(/\.jsonl?$/, ''));
+        found.set(id, { id: name.replace(/\.jsonl?$/, ''), file: path.join(dir, name) });
       }
     }
   }
@@ -280,7 +330,7 @@ async function workspaceFolder(workspaceDir: string): Promise<string | Unknown> 
   return typeof f === 'string' ? f : UNKNOWN;
 }
 
-async function readChildLog(sessionDir: string, file: string): Promise<Omit<ChildSessionExport, 'id' | 'label' | 'file'>> {
+async function readChildLog(sessionDir: string, file: string): Promise<{ requests: number; credits: number; inputTokens: number; outputTokens: number }> {
   const out = { requests: 0, credits: 0, inputTokens: 0, outputTokens: 0 };
   let text = '';
   try {
@@ -314,12 +364,16 @@ export async function buildSessionExports(
   data: ParsedData,
   config: CoachConfig,
   tokenCoachVersion: string,
-  generatedAt = new Date()
+  generatedAt = new Date(),
+  opts: { otelFile?: string } = {}
 ): Promise<SessionExport[]> {
+  const otel = await readOtelUsage(opts.otelFile);
+  const gitCache = new Map<string, GitInfo>();
   // Parsed records, for the context breakdown and attachments only.
   const parsedByKey = new Map<string, (typeof data.requests)[number]>();
   for (const r of data.requests) {
-    parsedByKey.set(`${r.sessionId}:${r.timestamp}:${r.inputTokens}`, r);
+    // Line number is unique per log file; timestamp + tokens can collide on retries.
+    parsedByKey.set(`${r.sessionId}:${r.logLine}`, r);
   }
   const chatsById = new Map(groupByChat(data).map((c) => [c.sessionId, c]));
 
@@ -330,7 +384,7 @@ export async function buildSessionExports(
     const list = byWorkspace.get(ws);
     list ? list.push(f) : byWorkspace.set(ws, [f]);
   }
-  const chatIds = new Map<string, string>();
+  const chatIds = new Map<string, { id: string; file: string }>();
   const folders = new Map<string, string>();
   for (const [ws, list] of byWorkspace) {
     for (const [k, v] of await chatFileIndex(ws, list.map((f) => f.sessionId))) {
@@ -368,26 +422,47 @@ export async function buildSessionExports(
     let copilot: string | Unknown = UNKNOWN;
     let firstTs = 0;
     let lastTs = 0;
-    const children: { id: string; label: string | Unknown; file: string }[] = [];
+    const children: { id: string; label: string | Unknown; file: string; at: number; line: number; parentMessageIndex: number | Unknown }[] = [];
     const requests: RequestExport[] = [];
+    const rawRequests: RawRequest[] = [];
+    const toolCalls: RawToolCall[] = [];
+    const userMessageTimes: number[] = [];
+    const userMessageTexts: (string | undefined)[] = [];
+    // Conversation span: only events that are the conversation itself. Copilot
+    // also writes discovery / customization events into a log, sometimes hours
+    // before or after the chat, which would inflate the duration.
+    let convFirst = 0;
+    let convLast = 0;
+    const sidecarInfo = new Map<string, SidecarInfo | undefined>();
+    const chatEntry = chatIds.get(f.sessionId);
+    const selections: ChatSelection[] = chatEntry ? await readChatSelections(chatEntry.file) : [];
 
-    lines.forEach((line, i) => {
-      const t = line.trim();
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].trim();
       if (!t) {
-        return;
+        continue;
       }
       let e: any;
       try {
         e = JSON.parse(t);
       } catch {
         unreadable++;
-        return;
+        continue;
+      }
+      // Valid JSON that isn't an event (e.g. a bare `null`) is unreadable too.
+      if (!e || typeof e !== 'object') {
+        unreadable++;
+        continue;
       }
       events++;
       const ts = num(e.ts) ?? 0;
       if (ts) {
         firstTs = firstTs ? Math.min(firstTs, ts) : ts;
         lastTs = Math.max(lastTs, ts + (num(e.dur) ?? 0));
+        if (/^(user_message|llm_request|tool_call|agent_response|turn_start|turn_end)$/.test(String(e.type))) {
+          convFirst = convFirst ? Math.min(convFirst, ts) : ts;
+          convLast = Math.max(convLast, ts + (num(e.dur) ?? 0));
+        }
       }
       const a = e.attrs ?? {};
       if (e.type === 'session_start') {
@@ -395,11 +470,28 @@ export async function buildSessionExports(
         copilot = typeof a.copilotVersion === 'string' ? a.copilotVersion : copilot;
       } else if (e.type === 'user_message') {
         userMessages++;
+        userMessageTimes.push(ts);
+        const content = a.content ?? a.message ?? a.text;
+        userMessageTexts.push(typeof content === 'string' ? content : undefined);
+      } else if (e.type === 'tool_call') {
+        toolCalls.push({
+          at: ts,
+          line: i + 1,
+          name: typeof e.name === 'string' ? e.name : UNKNOWN,
+          status: typeof e.status === 'string' ? e.status : UNKNOWN,
+          durationMs: num(e.dur) ?? 0,
+          args: typeof a.args === 'string' ? a.args : JSON.stringify(a.args ?? ''),
+          error: typeof a.error === 'string' ? a.error : undefined,
+          messageIndex: userMessages - 1,
+        });
       } else if (e.type === 'child_session_ref' && typeof a.childSessionId === 'string') {
         children.push({
           id: a.childSessionId,
           label: typeof a.label === 'string' ? a.label : UNKNOWN,
           file: typeof a.childLogFile === 'string' ? a.childLogFile : '',
+          at: ts,
+          line: i + 1,
+          parentMessageIndex: userMessages > 0 ? userMessages - 1 : UNKNOWN,
         });
       } else if (e.type === 'llm_request') {
         const raw: Record<string, number> = {};
@@ -423,7 +515,36 @@ export async function buildSessionExports(
         const credits = raw.copilotUsageNanoAiu !== undefined ? round(raw.copilotUsageNanoAiu / NANO_PER_CREDIT) : UNKNOWN;
         const cat = catalog?.get(model);
         const catCredits = input !== undefined ? catalogCredits(model, cat, input, cached, output) : UNKNOWN;
-        const parsed = parsedByKey.get(`${f.sessionId}:${ts}:${input ?? 0}`);
+        const parsed = parsedByKey.get(`${f.sessionId}:${i + 1}`);
+        const spFile = typeof a.systemPromptFile === 'string' ? a.systemPromptFile : undefined;
+        const tlFile = typeof a.toolsFile === 'string' ? a.toolsFile : undefined;
+        const sp = spFile ? await readSidecar(sessionDir, spFile, sidecarInfo) : undefined;
+        const tl = tlFile ? await readSidecar(sessionDir, tlFile, sidecarInfo) : undefined;
+        const responseId = typeof a.responseId === 'string' ? a.responseId : undefined;
+        const ot = responseId ? otel.byResponseId.get(responseId) : undefined;
+        const messageIndex = Math.max(0, userMessages - 1);
+        const effort = typeof opts?.reasoning?.effort === 'string' ? opts.reasoning.effort : opts ? NOT_SENT : UNKNOWN;
+        const budget = num(opts?.thinking?.budget_tokens) ?? (opts ? NOT_SENT : UNKNOWN);
+        const sel = userMessageTimes.length
+          ? selectionFor(userMessageTimes[messageIndex], selections, userMessageTexts[messageIndex])?.modelId
+          : undefined;
+        rawRequests.push({
+          index: requests.length,
+          at: ts,
+          end: ts + (num(e.dur) ?? 0),
+          line: i + 1,
+          purpose: typeof a.debugName === 'string' ? a.debugName : UNKNOWN,
+          model,
+          input,
+          cached: raw.cachedTokens,
+          output: raw.outputTokens,
+          effort: String(effort),
+          thinkingBudget: String(budget),
+          systemPromptFile: spFile,
+          toolsFile: tlFile,
+          responseId,
+          messageIndex,
+        });
         requests.push({
           index: requests.length,
           at: isoLocal(ts),
@@ -436,10 +557,26 @@ export async function buildSessionExports(
           model,
           status: typeof e.status === 'string' ? e.status : UNKNOWN,
           raw,
+          messageIndex,
+          selection: { selected: sel ?? UNKNOWN, mode: selectionMode(sel) },
+          prefix: {
+            systemPrompt: { file: spFile ?? UNKNOWN, chars: sp?.chars ?? UNKNOWN, hash: sp?.hash ?? UNKNOWN },
+            tools: {
+              file: tlFile ?? UNKNOWN,
+              count: tl?.toolNames?.length ?? UNKNOWN,
+              mcpCount: tl?.toolNames ? tl.toolNames.filter((n) => n.startsWith('mcp_')).length : UNKNOWN,
+              chars: tl?.chars ?? UNKNOWN,
+              hash: tl?.hash ?? UNKNOWN,
+            },
+          },
+          otel: {
+            cacheCreationInputTokens: ot?.cacheCreationInputTokens ?? UNKNOWN,
+            reasoningTokens: ot?.reasoningTokens ?? UNKNOWN,
+          },
           // requestOptions present but no reasoning key = nothing was sent, which is a fact, not unknown.
           reasoning: {
-            effort: typeof opts?.reasoning?.effort === 'string' ? opts.reasoning.effort : opts ? NOT_SENT : UNKNOWN,
-            thinkingBudgetTokens: num(opts?.thinking?.budget_tokens) ?? (opts ? NOT_SENT : UNKNOWN),
+            effort,
+            thinkingBudgetTokens: budget,
             summary: typeof opts?.reasoning?.summary === 'string' ? opts.reasoning.summary : opts ? NOT_SENT : UNKNOWN,
           },
           derived: {
@@ -458,16 +595,56 @@ export async function buildSessionExports(
               ? parsed.contextBreakdown.map((s) => ({ source: s.label, chars: s.chars }))
               : UNKNOWN,
             // A parsed request with no attachments list had none attached.
-            attachments: parsed ? (parsed.attachments ?? []).map((x) => ({ path: x.path, chars: x.chars })) : UNKNOWN,
+            attachments: parsed
+              ? (parsed.attachments ?? []).map((x) => ({ path: x.path, pathHash: shortHash(x.path), chars: x.chars }))
+              : UNKNOWN,
           },
         });
       }
+    }
+
+    // Workspace identity and MCP configuration (user + this workspace), read-only.
+    const folderUri = folders.get(ws) ?? UNKNOWN;
+    const folderPath = folderUri === UNKNOWN ? undefined : folderPathFromUri(folderUri);
+    const gitKey = folderPath ?? '';
+    const git = gitCache.get(gitKey) ?? (await readGit(folderPath));
+    gitCache.set(gitKey, git);
+    const userDir = path.resolve(ws, '..', '..');
+    const mcpFiles = [
+      path.join(userDir, 'mcp.json'),
+      path.join(userDir, 'settings.json'),
+      ...(folderPath ? [path.join(folderPath, '.vscode', 'mcp.json'), path.join(folderPath, '.vscode', 'settings.json')] : []),
+    ];
+    const mcp = await configuredMcpServers(mcpFiles);
+    const attachmentsSeen = requests.some(
+      (r) => Array.isArray(r.derived.attachments) && r.derived.attachments.length > 0
+    );
+    const signals = computeSignals({
+      requests: rawRequests,
+      toolCalls,
+      userMessageTimes,
+      userMessageTexts,
+      firstTs: convFirst,
+      lastTs: convLast,
+      sidecars: sidecarInfo,
+      mcpConfigured: mcp.servers,
+      chatSelections: selections,
+      attachmentsSeen,
+      gitBacked: git.gitBacked,
     });
 
     const childSessions: ChildSessionExport[] = [];
     for (const c of children) {
       const file = c.file && sidecars.includes(c.file) ? c.file : '';
-      childSessions.push({ ...c, file: file || UNKNOWN, ...(file ? await readChildLog(sessionDir, file) : { requests: 0, credits: 0, inputTokens: 0, outputTokens: 0 }) });
+      childSessions.push({
+        id: c.id,
+        label: c.label,
+        file: file || UNKNOWN,
+        spawnedAt: c.at ? isoLocal(c.at) : UNKNOWN,
+        spawnedAtLine: c.line,
+        parentMessageIndex: c.parentMessageIndex,
+        ...(file ? await readChildLog(sessionDir, file) : { requests: 0, credits: 0, inputTokens: 0, outputTokens: 0 }),
+      });
     }
 
     let totalIn = 0;
@@ -503,10 +680,10 @@ export async function buildSessionExports(
         debugSessionId: f.sessionId,
         workspaceStorageId: path.basename(ws),
         workspaceFolder: folders.get(ws) ?? UNKNOWN,
-        vscodeChatSessionId: chatIds.get(f.sessionId) ?? UNKNOWN,
+        vscodeChatSessionId: chatEntry?.id ?? UNKNOWN,
         title: chat?.title ?? UNKNOWN,
-        startedAt: isoLocal(firstTs),
-        endedAt: isoLocal(lastTs),
+        startedAt: isoLocal(convFirst || firstTs),
+        endedAt: isoLocal(convLast || lastTs),
       },
       versions: { vscode, copilotChat: copilot },
       coverage: {
@@ -517,13 +694,50 @@ export async function buildSessionExports(
         childLogs: childSessions.length,
         vscodeChatFile: chatIds.has(f.sessionId),
         notInLogs: [
-          'cache-write tokens',
-          'compaction events',
+          otel.byResponseId.size ? 'nothing extra: cache-write and reasoning tokens come from the OTel file' : 'cache-write and reasoning tokens (turn on Copilot OTel file export to get them)',
           'explicit 1M context selection',
           'model fallback reason',
+          'whether failed or cancelled requests were billed (the log carries no cost for them)',
         ],
       },
       thresholds,
+      heuristics: {
+        version: HEURISTICS_VERSION,
+        cacheWasteScore: `100 − ${POINTS_PER_WASTE_PCT} × (% of spend lost to avoidable cache misses)`,
+        cacheMissBelowShareOfReusablePrefix: MISS_BELOW,
+        minCacheableTokens: MIN_CACHEABLE_TOKENS,
+        cacheTtlMinutesAssumedByScore: config.cacheIdleMinutes,
+        cacheTtlNote: 'The score assumes this TTL to split timing from quality misses. Timeline gaps make no TTL claim.',
+        idleGapSeconds: IDLE_GAP_SECONDS,
+        contextDropShare: CONTEXT_DROP_SHARE,
+        contextDropMinTokens: CONTEXT_DROP_MIN_TOKENS,
+        utilityPurposePattern: UTILITY_PURPOSE.source,
+        compactionPurposePattern: COMPACTION_PURPOSE.source,
+        readToolPattern: READ_TOOL.source,
+        modelSelectionMatch: 'chat-file entry whose typed text matches the user message; else nearest timestamp within 60 s',
+        mcpOrigin: 'configured = matched to a server in mcp.json / settings.json (read at export time); name-derived = from mcp_<prefix>_ in the tool name',
+        contextAcquisitionMode: 'git-backed + agent reads/searches → repository; attachments without agent reads → task-scoped; both → mixed',
+      },
+      toolCalls: toolCalls.map((c) => {
+        let target: string | Unknown = UNKNOWN;
+        try {
+          const j = JSON.parse(c.args);
+          const t = j?.filePath ?? j?.path ?? j?.uri ?? j?.query ?? j?.command;
+          target = typeof t === 'string' ? t : UNKNOWN;
+        } catch {
+          target = UNKNOWN;
+        }
+        return {
+          at: isoLocal(c.at),
+          line: c.line,
+          name: c.name,
+          status: c.status,
+          durationMs: c.durationMs,
+          argsFingerprint: shortHash(`${c.name}\u0000${c.args}`),
+          target,
+          messageIndex: c.messageIndex,
+        };
+      }),
       pricing: {
         usdPerCredit: USD_PER_CREDIT,
         formula: 'credits = copilotUsageNanoAiu / 1e9; usd = credits × 0.01',
@@ -547,7 +761,11 @@ export async function buildSessionExports(
         reconciliationDeltaCredits: catalogComplete ? round(totalCredits - totalCatalog) : UNKNOWN,
         peakPromptTokens: peak,
         childSessionCredits: round(childSessions.reduce((s, c) => s + c.credits, 0)),
+        creditsIncludingChildren: round(totalCredits + childSessions.reduce((s, c) => s + c.credits, 0)),
       },
+      workspace: { folder: folderUri, ...git, mcpConfigFiles: mcp.sources },
+      otelFile: otel.status,
+      signals,
       cacheWaste: {
         score: eff?.score ?? 100,
         idlePauseCredits: round((eff?.timingWasteNanoAiu ?? 0) / NANO_PER_CREDIT),
@@ -602,10 +820,101 @@ export function sessionMarkdown(s: SessionExport): string {
   L.push(`| Child sessions (titles, subagents) | ${s.childSessions.length}, ${s.totals.childSessionCredits} credits | derived |`);
   L.push(`| Cache waste score | ${s.cacheWaste.score} · idle pauses ${s.cacheWaste.idlePauseCredits} cr (${s.cacheWaste.idlePauses}) · breaks ${s.cacheWaste.breakCredits} cr (${s.cacheWaste.breaks}) | heuristic |`);
   L.push('');
+  const g = s.signals;
+  L.push('## Workspace');
+  L.push('');
+  L.push('| Field | Value | Kind |');
+  L.push('| --- | --- | --- |');
+  L.push(`| Folder | ${show(s.workspace.folder)} | raw (workspace.json) |`);
+  L.push(`| Git | ${show(s.workspace.gitBacked)} · branch ${show(s.workspace.branch)} · HEAD ${show(s.workspace.head)} · remote ${show(s.workspace.remote)} | raw, read at export time (not session time) |`);
+  L.push(`| MCP config files read | ${s.workspace.mcpConfigFiles.length ? s.workspace.mcpConfigFiles.map((f) => `\`${f}\``).join(', ') : '—'} | raw |`);
+  L.push(`| Context acquisition mode | ${show(g.contextAcquisitionMode.value)} (${g.contextAcquisitionMode.basis}) | heuristic |`);
+  L.push(`| Duration | ${show(g.interaction.wallMinutes)} min wall time · ${g.interaction.durationBucket} | derived (first to last event; not effort) |`);
+  L.push(`| Requests per user message | ${show(g.interaction.requestsPerUserMessage)} (${g.interaction.mainRequests} conversation calls, ${g.interaction.utilityRequests} utility calls) | derived |`);
+  L.push('');
+  L.push('## Configuration');
+  L.push('');
+  L.push(`Models: ${g.configuration.modelsUsed.join(', ') || '—'} · switches ${g.configuration.modelSwitches} · A→B→A ${g.configuration.modelPingPong} · reasoning: ${g.configuration.reasoningLevels.join(', ') || '—'} (${g.configuration.reasoningChanges} changes)`);
+  L.push('');
+  if (g.configuration.selection.length) {
+    L.push('| Message | Selected in VS Code | Mode | Served by | Match |');
+    L.push('| --- | --- | --- | --- | --- |');
+    for (const m of g.configuration.selection) {
+      L.push(`| ${m.messageIndex} | ${show(m.selected)} | ${m.mode} | ${m.served.join(', ') || '—'} | ${show(m.matches)} |`);
+    }
+    L.push('');
+  }
+  L.push('## Timeline');
+  L.push('');
+  if (g.timeline.length) {
+    L.push('Changes during the conversation, with the numbers on both sides. Correlation, not cause.');
+    L.push('');
+    L.push('| Time | Event | From → to | Gap | Prompt before → after | Cache share before → after | Kind | Log line |');
+    L.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+    for (const e of g.timeline) {
+      L.push(
+        `| ${e.at.slice(11)} | ${e.kind} | ${e.from !== undefined ? `${e.from} → ${e.to}` : '—'} | ${e.gapSeconds !== undefined ? `${e.gapSeconds}s` : '—'} | ${show(e.promptBefore)} → ${show(e.promptAfter)} | ${pct(e.cacheShareBefore ?? UNKNOWN)} → ${pct(e.cacheShareAfter ?? UNKNOWN)} | ${e.signalKind} | ${e.logLine} |`
+      );
+    }
+  } else {
+    L.push('No model, reasoning, tool-catalog or system-prompt changes, gaps or compaction.');
+  }
+  L.push('');
+  L.push('## Tools and MCP');
+  L.push('');
+  const tl = g.tools;
+  L.push(`Available ${show(tl.available)} · used ${tl.used} · utilization ${pct(tl.utilization)} · calls ${tl.calls} · failures ${tl.failures} · longest failure run ${tl.longestFailureRun} · tool catalog changes ${tl.toolsetChanges}`);
+  L.push('');
+  if (tl.byTool.length) {
+    L.push('| Tool | Origin | Calls | Failures | Median ms | p95 ms | Max ms |');
+    L.push('| --- | --- | --- | --- | --- | --- | --- |');
+    for (const t of tl.byTool) {
+      L.push(`| ${t.name} | ${t.origin} | ${t.calls} | ${t.failures} | ${t.medianMs} | ${t.p95Ms} | ${t.maxMs} |`);
+    }
+    L.push('');
+  }
+  if (tl.mcpServers.length) {
+    L.push(`MCP servers presented to the model (configured: ${tl.mcpConfigured.join(', ') || 'none found'}):`);
+    L.push('');
+    L.push('| Server | Basis | Tools offered | Tools used | Calls |');
+    L.push('| --- | --- | --- | --- | --- |');
+    for (const m of tl.mcpServers) {
+      L.push(`| ${m.server} | ${m.basis} | ${m.toolsOffered} | ${m.toolsUsed} | ${m.calls} |`);
+    }
+    L.push('');
+  }
+  if (tl.retryChains.length) {
+    L.push('Retry chains (same tool, same arguments, at least one failure):');
+    L.push('');
+    for (const c of tl.retryChains) {
+      L.push(`- ${c.tool} · ${c.statuses.join(' → ')} · args #${c.argsFingerprint} · first at line ${c.firstLine}`);
+    }
+    L.push('');
+  }
+  if (tl.repeatedReads.length) {
+    L.push('Repeated reads (same target read more than once; whether the file changed in between is not logged):');
+    L.push('');
+    for (const r of tl.repeatedReads.slice(0, 20)) {
+      L.push(`- ${r.reads}× \`${r.target}\` (${r.tools.join(', ')}) · lines ${r.lines.join(', ')}`);
+    }
+    L.push('');
+  }
+  L.push('## Compaction');
+  L.push('');
+  if (g.compaction.length) {
+    L.push('| Time | Call | Prompt before | Prompt after | Freed |');
+    L.push('| --- | --- | --- | --- | --- |');
+    for (const c of g.compaction) {
+      L.push(`| ${c.at.slice(11)} | ${c.purpose} | ${show(c.promptBefore)} | ${show(c.promptAfter)} | ${show(c.freedTokens)} |`);
+    }
+  } else {
+    L.push('No summarization / compaction call in this log. Sharp prompt drops, if any, are in the timeline as context_drop (heuristic).');
+  }
+  L.push('');
   L.push('## Requests');
   L.push('');
-  L.push('| # | Time | Purpose | Model | Reasoning | Input | Cached | Output | Credits | Catalog | Prompt use | Log line |');
-  L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+  L.push('| # | Time | Msg | Purpose | Model | Selected | Reasoning | Input | Cached | Cache write | Output | Credits | Catalog | Prompt use | Tools | Log line |');
+  L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const r of s.requests) {
     const reasoning =
       typeof r.reasoning.effort === 'string' && r.reasoning.effort !== UNKNOWN && r.reasoning.effort !== NOT_SENT
@@ -616,7 +925,7 @@ export function sessionMarkdown(s: SessionExport): string {
             ? 'none'
             : '—';
     L.push(
-      `| ${r.index} | ${r.at.slice(11)} | ${show(r.purpose)} | ${r.model} | ${reasoning} | ${show(r.raw.inputTokens)} | ${show(r.raw.cachedTokens)} | ${show(r.raw.outputTokens)} | ${show(r.derived.credits)} | ${show(r.derived.catalogCredits)} | ${pct(r.derived.promptOccupancy)} | ${r.evidence.line} |`
+      `| ${r.index} | ${r.at.slice(11)} | ${r.messageIndex} | ${show(r.purpose)} | ${r.model} | ${r.selection.mode} | ${reasoning} | ${show(r.raw.inputTokens)} | ${show(r.raw.cachedTokens)} | ${show(r.otel.cacheCreationInputTokens)} | ${show(r.raw.outputTokens)} | ${show(r.derived.credits)} | ${show(r.derived.catalogCredits)} | ${pct(r.derived.promptOccupancy)} | ${show(r.prefix.tools.count)} | ${r.evidence.line} |`
     );
   }
   L.push('');
@@ -626,7 +935,8 @@ export function sessionMarkdown(s: SessionExport): string {
 }
 
 function csvCell(v: unknown): string {
-  const s = v === undefined ? '' : String(v);
+  // One word for "not in the log" everywhere: blank cells would read as zero.
+  const s = v === undefined || v === null ? UNKNOWN : String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -634,7 +944,8 @@ export function requestsCsv(sessions: SessionExport[]): string {
   const head = [
     'debugSessionId', 'index', 'at', 'logFile', 'logLine', 'purpose', 'model', 'status', 'reasoningEffort',
     'thinkingBudgetTokens', 'inputTokens', 'cachedTokens', 'outputTokens', 'copilotUsageNanoAiu', 'credits',
-    'catalogCredits', 'reconciliationDeltaCredits', 'promptOccupancy', 'longContext',
+    'catalogCredits', 'reconciliationDeltaCredits', 'promptOccupancy', 'longContext', 'messageIndex', 'selectedModel',
+    'selectionMode', 'cacheCreationInputTokens', 'reasoningTokens', 'toolCount', 'toolCatalogHash', 'systemPromptHash',
   ];
   const rows = [head.join(',')];
   for (const s of sessions) {
@@ -644,11 +955,50 @@ export function requestsCsv(sessions: SessionExport[]): string {
           s.session.debugSessionId, r.index, r.at, r.evidence.file, r.evidence.line, r.purpose, r.model, r.status,
           r.reasoning.effort, r.reasoning.thinkingBudgetTokens, r.raw.inputTokens, r.raw.cachedTokens,
           r.raw.outputTokens, r.raw.copilotUsageNanoAiu, r.derived.credits, r.derived.catalogCredits,
-          r.derived.reconciliationDeltaCredits, r.derived.promptOccupancy, r.derived.longContext,
+          r.derived.reconciliationDeltaCredits, r.derived.promptOccupancy, r.derived.longContext, r.messageIndex,
+          r.selection.selected, r.selection.mode, r.otel.cacheCreationInputTokens, r.otel.reasoningTokens,
+          r.prefix.tools.count, r.prefix.tools.hash, r.prefix.systemPrompt.hash,
         ]
           .map(csvCell)
           .join(',')
       );
+    }
+  }
+  return rows.join('\n') + '\n';
+}
+
+export function eventsCsv(sessions: SessionExport[]): string {
+  const head = ['debugSessionId', 'at', 'kind', 'signalKind', 'from', 'to', 'gapSeconds', 'promptBefore', 'promptAfter', 'cacheShareBefore', 'cacheShareAfter', 'requestIndex', 'logLine', 'note'];
+  const rows = [head.join(',')];
+  for (const s of sessions) {
+    for (const e of s.signals.timeline) {
+      rows.push(
+        [s.session.debugSessionId, e.at, e.kind, e.signalKind, e.from, e.to, e.gapSeconds, e.promptBefore, e.promptAfter, e.cacheShareBefore, e.cacheShareAfter, e.requestIndex, e.logLine, e.note]
+          .map(csvCell)
+          .join(',')
+      );
+    }
+  }
+  return rows.join('\n') + '\n';
+}
+
+export function toolCallsCsv(sessions: SessionExport[]): string {
+  const head = ['debugSessionId', 'at', 'logLine', 'messageIndex', 'tool', 'status', 'durationMs', 'argsFingerprint', 'target'];
+  const rows = [head.join(',')];
+  for (const s of sessions) {
+    for (const c of s.toolCalls) {
+      rows.push([s.session.debugSessionId, c.at, c.line, c.messageIndex, c.name, c.status, c.durationMs, c.argsFingerprint, c.target].map(csvCell).join(','));
+    }
+  }
+  return rows.join('\n') + '\n';
+}
+
+export function toolsCsv(sessions: SessionExport[]): string {
+  const head = ['debugSessionId', 'tool', 'origin', 'calls', 'failures', 'medianMs', 'p95Ms', 'maxMs'];
+  const rows = [head.join(',')];
+  for (const s of sessions) {
+    for (const t of s.signals.tools.byTool) {
+      rows.push([s.session.debugSessionId, t.name, t.origin, t.calls, t.failures, t.medianMs, t.p95Ms, t.maxMs].map(csvCell).join(','));
     }
   }
   return rows.join('\n') + '\n';
@@ -659,7 +1009,10 @@ export function sessionsCsv(sessions: SessionExport[]): string {
     'debugSessionId', 'vscodeChatSessionId', 'workspaceFolder', 'title', 'startedAt', 'endedAt', 'vscode',
     'copilotChat', 'userMessages', 'requests', 'inputTokens', 'cachedTokens', 'outputTokens', 'credits', 'usd',
     'catalogCredits', 'reconciliationDeltaCredits', 'peakPromptTokens', 'childSessions', 'childSessionCredits',
-    'cacheWasteScore', 'idlePauseCredits', 'breakCredits',
+    'cacheWasteScore', 'idlePauseCredits', 'breakCredits', 'wallMinutes', 'durationBucket', 'requestsPerUserMessage',
+    'modelSwitches', 'modelPingPong', 'reasoningChanges', 'selectionModes', 'toolCalls', 'toolFailures', 'toolsAvailable',
+    'toolUtilization', 'retryChains', 'repeatedReads', 'toolsetChanges', 'compactions', 'contextAcquisitionMode',
+    'gitBacked', 'gitBranch',
   ];
   const rows = [head.join(',')];
   for (const s of sessions) {
@@ -670,7 +1023,13 @@ export function sessionsCsv(sessions: SessionExport[]): string {
         s.totals.requests, s.totals.inputTokens, s.totals.cachedTokens, s.totals.outputTokens, s.totals.credits,
         s.totals.usd, s.totals.catalogCredits, s.totals.reconciliationDeltaCredits, s.totals.peakPromptTokens,
         s.childSessions.length, s.totals.childSessionCredits, s.cacheWaste.score, s.cacheWaste.idlePauseCredits,
-        s.cacheWaste.breakCredits,
+        s.cacheWaste.breakCredits, s.signals.interaction.wallMinutes, s.signals.interaction.durationBucket,
+        s.signals.interaction.requestsPerUserMessage, s.signals.configuration.modelSwitches,
+        s.signals.configuration.modelPingPong, s.signals.configuration.reasoningChanges,
+        [...new Set(s.signals.configuration.selection.map((m) => m.mode))].join(' '), s.signals.tools.calls,
+        s.signals.tools.failures, s.signals.tools.available, s.signals.tools.utilization, s.signals.tools.retryChains.length,
+        s.signals.tools.repeatedReads.length, s.signals.tools.toolsetChanges, s.signals.compaction.length,
+        s.signals.contextAcquisitionMode.value, s.workspace.gitBacked, s.workspace.branch,
       ]
         .map(csvCell)
         .join(',')

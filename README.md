@@ -138,7 +138,9 @@ Higher-level views layered on top of the raw cost data:
   new message shows an actionable inefficiency (cache went cold from idle/size, or
   open files dominate context).
 - **Save / export** — *Token Coach: Export Report* asks where to save (remembering your last folder) and writes
-  a folder with the overall Markdown report
+  a folder with the overall Markdown report (conversation list, by month, by day, by length),
+  per-conversation files with the timeline of changes, model selection, tools and MCP, compaction,
+  workspace and git, and CSV tables (sessions, requests, events, tools, tool calls),
   (by month, by day, from the logs), one JSON + Markdown file per session (raw log counters under their own
   names, derived values with formulas, `unknown` where the log is silent, the log line to
   verify each request, versions, coverage, billing reconciliation), and CSV tables;

@@ -64,11 +64,11 @@ export interface EfficiencyScore {
 }
 
 /** Reuse below this share of the reusable prefix is a miss. */
-const MISS_BELOW = 0.5;
+export const MISS_BELOW = 0.5;
 /** Prefixes smaller than this can't be cached by the providers at all. */
-const MIN_CACHEABLE_TOKENS = 2048;
+export const MIN_CACHEABLE_TOKENS = 2048;
 /** Each 1% of spend lost costs this many points: 5% lost → 90, 10% → 80, 25% → 50. */
-const POINTS_PER_WASTE_PCT = 2;
+export const POINTS_PER_WASTE_PCT = 2;
 /** Rough chars→tokens estimate for the logged context sizes. */
 const CHARS_PER_TOKEN = 4;
 

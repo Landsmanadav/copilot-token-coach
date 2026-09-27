@@ -686,6 +686,7 @@ function renderRequestItem(record: LlmRequestRecord, config: CoachConfig): strin
         <span class="tip tip-left" data-tip="${escapeHtml(cacheTip)}">cache ${escapeHtml(formatPercent(record.cacheHitRate))}</span>
       </span>
       <span class="item-cost strong">${escapeHtml(formatCost(record.costNanoAiu))}</span>
+      <button type="button" class="evidence" data-req="${escapeHtml(record.id)}" title="Open the Copilot log at this request's line to verify it">line ${record.logLine}</button>
       ${warnings.length ? `<div class="item-warn">${renderWarnings(warnings)}</div>` : ''}
     </div>`;
 }
@@ -2361,6 +2362,83 @@ export function renderHtml(
       border: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.45)); padding: 9px 16px;
     }
     button.ghost:hover { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
+    /* =====================================================================
+       v2.7 refresh — "calm instrument". Same tokens, softer surfaces, one
+       clear hierarchy: Today and Wasted lead at double width, everything else
+       reads as secondary. Still 100% VS Code theme variables.
+       ===================================================================== */
+    :root {
+      --tc-radius: 10px;
+      --tc-radius-sm: 7px;
+      --tc-shadow: 0 1px 0 color-mix(in srgb, var(--vscode-foreground) 6%, transparent) inset,
+                   0 6px 18px -12px color-mix(in srgb, #000 55%, transparent);
+      --tc-accent: var(--vscode-focusBorder, var(--tc-blue));
+    }
+    body::before {
+      background-image: radial-gradient(1100px 360px at 12% -80px,
+        color-mix(in srgb, var(--tc-accent) 12%, transparent), transparent 70%);
+      background-size: auto; mask-image: none; -webkit-mask-image: none;
+    }
+    h1 { letter-spacing: 0.08em; }
+    .masthead { border-bottom-color: transparent; box-shadow: 0 1px 0 var(--tc-line); }
+
+    button {
+      text-transform: none; letter-spacing: 0; font-size: 0.85em; font-weight: 500;
+      border-radius: 999px; padding: 4px 13px;
+    }
+    #export {
+      background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+      border-color: transparent;
+    }
+    #export:hover { background: var(--vscode-button-hoverBackground); color: var(--vscode-button-foreground); }
+    button:focus-visible { outline: 2px solid var(--tc-accent); outline-offset: 2px; }
+
+    /* Four columns: Today and Wasted fill the first row at double width, the
+       four secondary readouts fill the second. Two columns below 900px, one
+       below 520px. */
+    .cards.kpi-grid { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .kpi-grid .card-hero, .kpi-grid .card-eff { grid-column: span 2; }
+    @media (max-width: 900px) {
+      .cards.kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 520px) {
+      .cards.kpi-grid { grid-template-columns: minmax(0, 1fr); }
+      .kpi-grid .card-hero, .kpi-grid .card-eff { grid-column: auto; }
+    }
+    .card {
+      border-radius: var(--tc-radius); padding: 14px 16px; min-width: 0;
+      box-shadow: var(--tc-shadow);
+    }
+    .card:hover { transform: translateY(-1px); }
+    .card::before { height: 3px; border-radius: 0 0 3px 3px; left: 14px; right: 14px; }
+    .card-label {
+      text-transform: none; letter-spacing: 0.01em; font-size: 0.78em; font-weight: 600;
+    }
+    .card-value { font-size: 1.65em; }
+    .card-hero .card-value, .card-eff .card-value { font-size: 2.3em; font-weight: 700; line-height: 1.05; }
+    .card-ringrow { flex-wrap: wrap; }
+    .card-ringtext { min-width: 0; }
+
+    .tools-inv, .model-spend, .history, .coverage, .unused-trend, .panel {
+      border-radius: var(--tc-radius);
+    }
+    .tools-inv, .model-spend, .history, .panel { box-shadow: var(--tc-shadow); }
+    .tools-inv > summary, .model-spend > summary, .history > summary, .panel-title, .section-title {
+      text-transform: none; letter-spacing: 0.01em; font-size: 0.9em;
+    }
+    .coverage { border-left-width: 1px; }
+    .unused-trend { border-left-width: 1px; }
+
+    /* Evidence link: a small mono chip that opens the raw log line. */
+    .evidence {
+      font-family: var(--tc-mono); font-size: 0.72em; padding: 1px 7px; margin-left: 6px;
+      border-radius: 999px; color: var(--vscode-textLink-foreground);
+      border-color: color-mix(in srgb, var(--vscode-textLink-foreground) 35%, transparent);
+    }
+    .evidence:hover { color: var(--vscode-textLink-activeForeground); }
+
+    /* Heuristic markers inside tips read quieter than the finding itself. */
+    .warn-list li, .item-warn { line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -2502,6 +2580,14 @@ export function renderHtml(
       const el = document.getElementById(id);
       if (el) { el.addEventListener('click', () => vscode.postMessage({ command })); }
     };
+    // Evidence links: open the raw log line behind a request.
+    document.addEventListener('click', (ev) => {
+      const el = ev.target && ev.target.closest ? ev.target.closest('.evidence') : null;
+      if (el) {
+        ev.stopPropagation();
+        vscode.postMessage({ command: 'openLog', id: el.getAttribute('data-req') });
+      }
+    }, true);
     wire('enableLogging', 'enableLogging');
     wire('emptyRefresh', 'refresh');
     wire('settings', 'openSettings');
@@ -2558,6 +2644,8 @@ export class DashboardPanel {
 
   /** Whether Copilot debug logging is on — drives which empty state we show. */
   private loggingEnabled = true;
+  /** The data last rendered, so an evidence link can be resolved to a real log line. */
+  private lastData: ParsedData | undefined;
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -2577,6 +2665,17 @@ export class DashboardPanel {
           void vscode.commands.executeCommand('tokenCoach.openSettings');
         } else if (message?.command === 'export') {
           void vscode.commands.executeCommand('tokenCoach.exportReport');
+        } else if (message?.command === 'openLog' && typeof message.id === 'string') {
+          // Only records Token Coach itself parsed can be opened — never a path from the page.
+          const rec = this.lastData?.requests.find((r) => r.id === message.id);
+          if (rec) {
+            const pos = new vscode.Position(Math.max(0, rec.logLine - 1), 0);
+            void vscode.window.showTextDocument(vscode.Uri.file(rec.sourceFile), {
+              selection: new vscode.Range(pos, pos),
+              preview: true,
+              viewColumn: vscode.ViewColumn.Beside,
+            });
+          }
         } else if (message?.command === 'toggle' && typeof message.id === 'string') {
           // Remember expand/collapse so a refresh keeps chats/messages as they were.
           this.openState.set(message.id, !!message.open);
@@ -2618,6 +2717,7 @@ export class DashboardPanel {
   /** Re-render with fresh data. Safe to call when the panel is hidden. */
   update(data: ParsedData, config: CoachConfig, history: DailySnapshot[] = [], loggingEnabled = true): void {
     this.loggingEnabled = loggingEnabled;
+    this.lastData = data;
 
     // The editor tab title shows this month's spend. The month starts the way
     // Copilot billing does: 00:00 UTC on the 1st.

@@ -8,7 +8,7 @@
 
 import { ParsedData, groupByChat, analyzeToolInventory } from './logParser';
 import { CoachConfig } from './coach';
-import { computeEfficiency } from './efficiency';
+import { computeEfficiency, windowStart } from './efficiency';
 import { formatCost, formatUsd, formatTokensCompact } from './dashboard';
 
 /** One day's recorded headline numbers, for the efficiency/savings trend. */
@@ -31,7 +31,7 @@ export function buildMarkdownReport(
   history: DailySnapshot[],
   generatedAt: Date
 ): string {
-  const eff = computeEfficiency(data, config);
+  const eff = computeEfficiency(data, config, windowStart(generatedAt.getTime()));
   const inv = analyzeToolInventory(data);
   const chats = groupByChat(data);
   const showUsd = config.usdPerAiu > 0;
@@ -60,8 +60,10 @@ export function buildMarkdownReport(
   L.push(`| Metric | Value |`);
   L.push(`| --- | --- |`);
   if (eff.hasData) {
-    const cacheBit = eff.hasCacheData ? `warm cache ${eff.cacheScore}` : 'warm cache n/a';
-    L.push(`| **Efficiency** | ${eff.grade} · ${eff.score}/100 (${cacheBit}, clean ${eff.cleanScore}) |`);
+    const lost = eff.timingWasteNanoAiu + eff.qualityWasteNanoAiu;
+    L.push(`| **Lost to avoidable cache misses (last 7 days)** | ${formatCost(lost)}${usd(lost)} of ${formatCost(eff.totalCostNanoAiu)} · score ${eff.score} (${eff.grade}) |`);
+    L.push(`| After idle pauses | ${formatCost(eff.timingWasteNanoAiu)}${usd(eff.timingWasteNanoAiu)} (${eff.idleMisses}) |`);
+    L.push(`| Model switches / broken cache | ${formatCost(eff.qualityWasteNanoAiu)}${usd(eff.qualityWasteNanoAiu)} (${eff.breakMisses}) |`);
     if (eff.topDrag) {
       L.push(`| Top drag | ${eff.topDrag} |`);
     }

@@ -104,14 +104,16 @@ So this tool surfaces:
 
 Higher-level views layered on top of the raw cost data:
 
-- **Efficiency grade (A–F)** — one glanceable health score measuring
-  **avoidable waste only**: 60% *warm-chat* cache reuse (judged solely on
-  requests where reuse was actually possible — a chat's first request and
-  one-off focused questions are never penalized) + 40% "clean runs" with
-  partial credit (100 clean / 50 warning / 0 error per message). The card also
-  names the **top drag** — the single thing pulling your grade down. Shown in
-  the status bar (which tints **yellow/red** when efficiency is poor), as a
-  dashboard card, and as a **per-chat grade badge**.
+- **Wasted · 7 days** — how much of the last 7 days' spend was lost to **avoidable
+  cache misses**, in dollars, with a score beside it (100 minus 2 points per 1% lost). Two sub-scores:
+  **cache timing** (the chat sat idle past the ~5 min cache window, so its history
+  was re-billed at full price) and **cache quality** (the cache broke mid-chat —
+  a model switch, or changed context on Claude, whose cache is deterministic).
+  Big prompts and expensive agent runs don't lower the grade: that's the work,
+  not waste. Misses on GPT-family models inside the cache window are shown but not
+  graded — their caching is best-effort on the provider side. The card names the
+  **top drag** with the money it cost. Shown in the status bar (tinted
+  **yellow/red** when poor), as a dashboard card, and as a **per-chat badge**.
 - **Model spend** — a per-model table of requests / tokens / cost, tagged
   **billed** vs **included**, so you see where premium budget goes. A
   `premium-overkill` coaching note flags small, billed turns a base (included)
@@ -123,7 +125,7 @@ Higher-level views layered on top of the raw cost data:
   that stay unused *across chats*, so you can consider disabling the MCP server or
   tool set they come from. It uses a **net counter** (`+1` for each chat a tool was
   offered but never called, `−1` for each chat it *was* used, floored at `0`) and
-  flags a tool once it reaches `tokenCoach.unusedToolMinChats` (default `3`). Use
+  flags a tool once it reaches `3`. Use
   the tool again and its score falls until it drops off the list — so the advice
   self-corrects. Framed honestly as "unused in your logged chats", not "safe to
   delete".
@@ -210,27 +212,12 @@ code --install-extension token-coach-2.0.0.vsix
 
 ## Settings
 
-Every threshold below is a regular VS Code setting — edit it in the Settings UI
-(run **“Token Coach: Open Settings”** from the Command Palette to jump straight to
-them), or in your `settings.json`. Nothing is hard-coded.
+Two settings, both about what you see. Every threshold is a fixed default.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `tokenCoach.costWarnThreshold` | `3` | Flag a request that costs more than this many **credits** (1 credit = 1 AIU = $0.01). |
-| `tokenCoach.inputWarnThreshold` | `50000` | Flag `inputTokens` above this. |
-| `tokenCoach.lowCacheRateThreshold` | `0.5` | Cache hit rate below this is "low". |
-| `tokenCoach.lowCacheMinInputTokens` | `20000` | Minimum input before the low-cache rule fires. |
-| `tokenCoach.ioRatioThreshold` | `1000` | Flag `inputTokens/outputTokens` above this. |
-| `tokenCoach.ioMinInputTokens` | `10000` | Minimum input before the tiny-output rule fires, so small side-calls aren't mislabelled "huge input". |
-| `tokenCoach.attachmentShareWarn` | `0.4` | Flag a message when open/attached files exceed this share of its logged context. |
-| `tokenCoach.slowToolWarnMs` | `10000` | Flag a message when one tool consumes more than this many ms (summed across calls). |
-| `tokenCoach.unusedToolMinChats` | `3` | Net "unused across chats" score a tool must reach before the dashboard flags it as a candidate to disable (`+1` per chat offered-but-unused, `−1` per chat used, floored at `0`). |
-| `tokenCoach.cacheIdleMinutes` | `5` | Idle minutes after which the prompt cache is assumed expired (Claude TTL ~5 min, OpenAI ~5–10 min). A mid-chat message after a longer pause whose cache reuse also dropped is flagged `cache-expired-idle`. `0` disables. |
-| `tokenCoach.cacheTargetRate` | `0.7` | Warm-chat cache hit rate that earns a perfect cache sub-score in the efficiency grade. Judged only on requests where reuse was possible (same chat, within the TTL). |
-| `tokenCoach.usdPerAiu` | `0.01` | US dollars per 1 AIU (1 AI credit = $0.01, 1 AIU ≈ 1 credit). Set `0` to hide dollar figures. |
-| `tokenCoach.notifyOnExpensiveRequest` | `true` | Notify when a new request exceeds the cost threshold. |
-| `tokenCoach.notifyOnInefficiency` | `true` | Gentle, throttled nudge (≤1 / 5 min) on a new message's actionable inefficiency (cache cold mid-chat, heavy attachments). |
-| `tokenCoach.pollIntervalSeconds` | `20` | Backup poll interval; `0` disables polling. |
+| `tokenCoach.showCostsIn` | `dollars` | Show costs in `dollars` (credits alongside) or `credits` only. |
+| `tokenCoach.popups` | `true` | Popups for an expensive request (> 25 credits) or a fixable waste tip (at most one per 5 min). They close by themselves. |
 
 > For a non-standard install, you can still point the scanner at an explicit
 > `workspaceStorage` directory by setting `tokenCoach.workspaceStoragePathOverride`
@@ -281,7 +268,7 @@ Sources: [GitHub Copilot is moving to usage-based billing](https://github.blog/n
 
 | Rule | Condition | Advice |
 | --- | --- | --- |
-| Expensive request | `cost > costWarnThreshold` | Split the task into smaller, focused steps. |
+| Expensive request | `cost > 25 credits` | Split the task into smaller, focused steps. |
 | Cold start (info) | first message of a chat with low aggregate cache | None needed — the cache is cold on the first message; staying in the chat reuses it next turn. |
 | Cache expired (idle) | a **later** message that arrived after a gap ≥ `cacheIdleMinutes` **and** whose cache reuse actually dropped | The prompt cache (TTL ~5 min, sliding) expired during the pause, so the whole context was re-billed at the full input rate. Keep a thread warm (next message within ~5 min) or batch related questions. |
 | Low cache hit | a **later** message (not the first) with large input and low cache, **not** explained by idle time | The chat likely outgrew the cache window or its context changed; for a new task, a fresh focused chat can be cheaper. |

@@ -20,7 +20,7 @@ import {
   ParsedData,
 } from './logParser';
 import { analyzeRecord, analyzeMessageDrivers, CoachConfig, CoachWarning, DEFAULT_COACH_CONFIG } from './coach';
-import { computeEfficiency, EfficiencyScore } from './efficiency';
+import { computeEfficiency, EfficiencyScore, windowStart } from './efficiency';
 import { buildMarkdownReport, DailySnapshot } from './report';
 import {
   DashboardPanel,
@@ -75,32 +75,29 @@ let nudgePrimed = false;
 let lastNudgeMs = 0;
 /** Minimum gap between inefficiency nudges, so they coach rather than nag. */
 const NUDGE_COOLDOWN_MS = 5 * 60 * 1000;
+/** Popups close themselves after this many seconds so they never pile up. */
+const NOTIFICATION_SECONDS = 3;
+/** Backup refresh on top of the file watcher. */
+const POLL_SECONDS = 20;
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 function getCoachConfig(): CoachConfig {
+  // Since v2.4 the only user-facing choices are about display. Every threshold
+  // is a fixed default (see DEFAULT_COACH_CONFIG); the grade no longer needs tuning.
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  const showDollars = cfg.get<string>('showCostsIn', 'dollars') !== 'credits';
   return {
-    // The setting is in credits (user-friendly); convert to NanoAiu (1 credit = 1e9)
-    // for the internal comparison against each request's costNanoAiu.
-    costWarnThreshold: Math.round(cfg.get<number>('costWarnThreshold', 25) * 1e9),
-    inputWarnThreshold: cfg.get('inputWarnThreshold', DEFAULT_COACH_CONFIG.inputWarnThreshold),
-    lowCacheRateThreshold: cfg.get('lowCacheRateThreshold', DEFAULT_COACH_CONFIG.lowCacheRateThreshold),
-    lowCacheMinInputTokens: cfg.get('lowCacheMinInputTokens', DEFAULT_COACH_CONFIG.lowCacheMinInputTokens),
-    ioRatioThreshold: cfg.get('ioRatioThreshold', DEFAULT_COACH_CONFIG.ioRatioThreshold),
-    ioMinInputTokens: cfg.get('ioMinInputTokens', DEFAULT_COACH_CONFIG.ioMinInputTokens),
-    attachmentShareWarn: cfg.get('attachmentShareWarn', DEFAULT_COACH_CONFIG.attachmentShareWarn),
-    slowToolWarnMs: cfg.get('slowToolWarnMs', DEFAULT_COACH_CONFIG.slowToolWarnMs),
-    usdPerAiu: cfg.get('usdPerAiu', DEFAULT_COACH_CONFIG.usdPerAiu),
-    costInputWeight: cfg.get('costInputWeight', DEFAULT_COACH_CONFIG.costInputWeight),
-    costCachedInputWeight: cfg.get('costCachedInputWeight', DEFAULT_COACH_CONFIG.costCachedInputWeight),
-    costOutputWeight: cfg.get('costOutputWeight', DEFAULT_COACH_CONFIG.costOutputWeight),
-    cacheIdleMinutes: cfg.get('cacheIdleMinutes', DEFAULT_COACH_CONFIG.cacheIdleMinutes),
-    cacheTargetRate: cfg.get('cacheTargetRate', DEFAULT_COACH_CONFIG.cacheTargetRate),
-    unusedToolMinChats: cfg.get('unusedToolMinChats', DEFAULT_COACH_CONFIG.unusedToolMinChats),
+    ...DEFAULT_COACH_CONFIG,
+    usdPerAiu: showDollars ? DEFAULT_COACH_CONFIG.usdPerAiu : 0,
   };
+}
+
+/** The one popup switch: expensive-request alerts and waste tips. */
+function popupsEnabled(): boolean {
+  return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('popups', true);
 }
 
 function getOverridePath(): string {
@@ -160,13 +157,12 @@ function updateStatusBar(data: ParsedData, config: CoachConfig): void {
     return;
   }
 
-  // Single glanceable health signal, computed from the same coaching rules the
-  // dashboard uses (cache reuse + waste warnings).
-  const eff = computeEfficiency(data, config);
+  // The headline: money lost to avoidable cache misses over the last 7 days.
+  const eff = computeEfficiency(data, config, windowStart());
 
   // Lead with "how much you've used today". Copilot's own menu already shows the
   // monthly credit total, so Token Coach doesn't try to mirror (and undercount) it.
-  const gradeTag = eff.hasData ? `${eff.grade} · ` : '';
+  const gradeTag = eff.hasData ? `score ${eff.score} · ` : '';
   const usedTag = showUsd ? `${formatUsd(todayCost, config.usdPerAiu)} today` : `${formatCost(todayCost)} today`;
   statusBarItem.text = `$(graph) ${gradeTag}${usedTag}`;
   statusBarItem.backgroundColor = statusBarColor(eff);
@@ -207,15 +203,13 @@ function buildStatusTooltip(s: TooltipStats, config: CoachConfig): vscode.Markdo
   const blocks: string[] = [];
 
   if (s.eff.hasData) {
-    const cacheBit = s.eff.hasCacheData
-      ? `Cache reuse ${s.eff.cacheScore}/100 · `
-      : `Cache reuse n/a (no warm-chat requests) · `;
+    const money = (nano: number) => (showUsd ? usd(nano) : formatCredits(nano));
+    const lost = s.eff.timingWasteNanoAiu + s.eff.qualityWasteNanoAiu;
     blocks.push(
-      `**$(graph) Token Coach** — Efficiency **${s.eff.grade}** · ${s.eff.score}/100\n\n` +
-        cacheBit +
-        `Clean runs ${s.eff.cleanScore}/100 ` +
-        `_(${s.eff.cleanMessages}/${s.eff.messageCount} messages fully clean)_` +
-        (s.eff.topDrag ? `\n\nTop drag: ${s.eff.topDrag}` : '')
+      `**$(graph) Token Coach** — last 7 days: **${money(lost)} lost** of ${money(s.eff.totalCostNanoAiu)} · ` +
+        `score **${s.eff.score}** (${s.eff.grade})\n\n` +
+        `${money(s.eff.timingWasteNanoAiu)} after idle pauses (${s.eff.idleMisses}) · ` +
+        `${money(s.eff.qualityWasteNanoAiu)} from model switches / broken cache (${s.eff.breakMisses})`
     );
   } else {
     blocks.push(`**$(graph) Token Coach**`);
@@ -272,41 +266,16 @@ async function refresh(): Promise<void> {
 
 /**
  * Show a notification that closes itself after a few seconds, so alerts and tips
- * never pile up in the corner. The delay is configurable
- * (`tokenCoach.notificationAutoDismissSeconds`, default 3).
- *
- * VS Code's `showWarningMessage` / `showInformationMessage` stay until clicked
- * and can't be dismissed from code, so for the auto-close path we render the
- * message as a notification-area progress task that resolves on a timer. Set the
- * setting to `0` to opt back into a classic sticky notification that carries an
- * "Open Dashboard" button.
+ * never pile up in the corner. VS Code's `showWarningMessage` can't be dismissed
+ * from code, so it's rendered as a notification-area progress task that
+ * resolves on a timer.
  */
-function notifyAutoDismiss(kind: 'warning' | 'info', message: string): void {
-  const seconds = vscode.workspace
-    .getConfiguration(CONFIG_SECTION)
-    .get<number>('notificationAutoDismissSeconds', 3);
-
-  // 0 (or unset to a non-positive value) → keep the classic sticky notification
-  // with a button, since a button can't survive the auto-dismiss path.
-  if (!seconds || seconds <= 0) {
-    const open = (choice?: string) => {
-      if (choice === 'Open Dashboard') {
-        void showDashboard();
-      }
-    };
-    const sticky =
-      kind === 'warning'
-        ? vscode.window.showWarningMessage(message, 'Open Dashboard')
-        : vscode.window.showInformationMessage(message, 'Open Dashboard');
-    void sticky.then(open);
-    return;
-  }
-
+function notifyAutoDismiss(_kind: 'warning' | 'info', message: string): void {
   // Auto-dismiss path: a notification-area task that simply waits, then resolves
   // so VS Code closes it for us.
   void vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: message },
-    () => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000))
+    () => new Promise<void>((resolve) => setTimeout(resolve, NOTIFICATION_SECONDS * 1000))
   );
 }
 
@@ -315,7 +284,7 @@ function notifyAutoDismiss(kind: 'warning' | 'info', message: string): void {
  * the existing ids so we don't fire a burst of notifications for old data.
  */
 function detectAndNotifyNew(records: LlmRequestRecord[], config: CoachConfig): void {
-  const notify = vscode.workspace.getConfiguration(CONFIG_SECTION).get('notifyOnExpensiveRequest', true);
+  const notify = popupsEnabled();
 
   const current = new Set<string>();
   const newExpensive: LlmRequestRecord[] = [];
@@ -382,7 +351,7 @@ function detectAndNotifyNudges(chats: ChatGroup[], config: CoachConfig): void {
     return;
   }
 
-  const notify = vscode.workspace.getConfiguration(CONFIG_SECTION).get('notifyOnInefficiency', true);
+  const notify = popupsEnabled();
   if (!notify || fresh.length === 0) {
     return;
   }
@@ -450,12 +419,25 @@ async function enableLogging(): Promise<void> {
   try {
     for (const key of COPILOT_LOG_KEYS) {
       await cfg.update(key, true, vscode.ConfigurationTarget.Global);
+      // A workspace value beats the global one. If this project turned logging
+      // off, turn it on here too, or the global switch silently does nothing.
+      if (cfg.inspect<boolean>(key)?.workspaceValue === false) {
+        await cfg.update(key, true, vscode.ConfigurationTarget.Workspace);
+      }
     }
   } catch (err) {
     vscode.window.showErrorMessage(
       `Token Coach: couldn't enable Copilot logging automatically (${String(err)}). ` +
         `Set ${COPILOT_LOG_SECTION}.enabled and .fileLogging.enabled to true in Settings.`
     );
+    return;
+  }
+  if (!isLoggingEnabled()) {
+    vscode.window.showWarningMessage(
+      'Token Coach: Copilot debug logging is still off — a folder or policy setting overrides it. ' +
+        `Check ${COPILOT_LOG_SECTION}.enabled and .fileLogging.enabled in Settings (Workspace and Folder tabs).`
+    );
+    await refresh();
     return;
   }
   vscode.window.showInformationMessage(
@@ -512,7 +494,8 @@ async function recordSnapshot(data: ParsedData, config: CoachConfig): Promise<vo
       dayCost += r.costNanoAiu;
     }
   }
-  const eff = computeEfficiency(data, config);
+  // Each day's point on the trend is that day alone, so improvement shows.
+  const eff = computeEfficiency(data, config, todayStart);
   const snap: DailySnapshot = {
     date,
     score: eff.score,
@@ -600,10 +583,7 @@ function setupPolling(): void {
     clearInterval(pollTimer);
     pollTimer = undefined;
   }
-  const seconds = vscode.workspace.getConfiguration(CONFIG_SECTION).get('pollIntervalSeconds', 20);
-  if (seconds && seconds > 0) {
-    pollTimer = setInterval(() => void refresh(), seconds * 1000);
-  }
+  pollTimer = setInterval(() => void refresh(), POLL_SECONDS * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,12 +634,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!e.affectsConfiguration(CONFIG_SECTION)) {
         return;
       }
-      if (
-        e.affectsConfiguration(`${CONFIG_SECTION}.workspaceStoragePathOverride`) ||
-        e.affectsConfiguration(`${CONFIG_SECTION}.pollIntervalSeconds`)
-      ) {
+      if (e.affectsConfiguration(`${CONFIG_SECTION}.workspaceStoragePathOverride`)) {
         void setupWatchers(context);
-        setupPolling();
       }
       void refresh();
     })

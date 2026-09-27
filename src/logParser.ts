@@ -37,6 +37,8 @@ export interface LlmRequestRecord {
   cacheHitRate: number;
   /** Time-to-first-token in ms, if present. */
   ttft?: number;
+  /** How long the request ran (ms, from the log's `dur`). The cache TTL counts from its end. */
+  durationMs: number;
   /** The most recent `user_message` content seen before this request (best-effort). */
   userMessage?: string;
   /** Session id, derived from the log directory name. */
@@ -878,6 +880,7 @@ export async function parseLogFile(file: LogFile): Promise<ParsedData> {
         costNanoAiu: num(attrs.copilotUsageNanoAiu),
         cacheHitRate,
         ttft: attrs.ttft !== undefined ? num(attrs.ttft) : undefined,
+        durationMs: num(event.dur),
         userMessage: lastUserMessage,
         sessionId: file.sessionId,
         messageId: messageIdFor(),
@@ -1334,9 +1337,9 @@ export function groupByChat(data: ParsedData): ChatGroup[] {
         // Gap from the previous message's last API call to this one's first —
         // the idle time that can let the prompt cache expire on its own.
         const prev = msgs[i - 1];
-        const prevEnd = prev.requests.length
-          ? prev.requests[prev.requests.length - 1].timestamp
-          : prev.startTime;
+        // The cache TTL runs from when the last call FINISHED, not when it started.
+        const last = prev.requests[prev.requests.length - 1];
+        const prevEnd = last ? last.timestamp + last.durationMs : prev.startTime;
         const thisStart = m.requests.length ? m.requests[0].timestamp : m.startTime;
         m.idleGapMsBefore = Math.max(0, thisStart - prevEnd);
       }

@@ -4,6 +4,43 @@ All notable changes to **Token Coach** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-09-27
+
+### Changed — a grade that works on real work
+- **The grade now measures one thing: money lost to avoidable cache misses**, as a
+  share of spend. The old grade penalized big prompts and expensive requests,
+  which is what real work on a large repo looks like, while its cache score sat
+  near 100% because agent loops are always warm. It graded the task, not the habit.
+- **Two sub-scores: cache timing and cache quality.** Timing = the chat went idle
+  past the ~5 min TTL (measured from the end of the last call, not its start).
+  Quality = a model switch mid-chat, or a Claude cache miss inside the TTL.
+- **Fair baselines.** Each request is compared with the previous call on the
+  same model. After a pause or switch, the system prompt and tool definitions
+  (which a fresh chat pays anyway) are not counted as waste. GPT-family misses
+  inside the TTL are reported, not graded: their caching is best-effort.
+- **The headline is money, over the last 7 days.** The card reads "Wasted · 7 days: $3.40 of
+  $20.00 spent", split into idle pauses and model switches / broken cache, with the score beside it.
+  Score = 100 minus 2 points per 1% of spend lost. The status bar shows the same score, and each
+  day's point on the trend covers that day alone (before, every number was all-time and barely moved).
+- **"Cache went cold" tips judge the message's first request.** The message
+  average hid a cold restart behind the warm agent-loop turns that follow it.
+
+### Changed — 19 settings down to 2
+- Only display choices remain: `tokenCoach.showCostsIn` (dollars / credits) and
+  `tokenCoach.popups`. Every threshold, the price weights, the poll interval and
+  the popup timeout are now fixed defaults.
+
+### Changed — clearer dashboard
+- "Cache hit rate" card renamed **Input from cache** (all requests), so it no
+  longer reads as contradicting the grade's cache scores.
+- Removed the "Token mix" card; the Token & cost breakdown panel shows the same
+  split in full.
+
+### Fixed
+- **"Enable logging" could report success while logging stayed off** when a
+  workspace setting turned it off. It now enables it at workspace level too, and
+  warns if a folder or policy setting still overrides it.
+
 ## [2.3.0] - 2026-07-02
 
 ### Changed — a fairer efficiency grade (measures avoidable waste only)

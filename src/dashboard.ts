@@ -43,7 +43,7 @@ import {
   highestLevel,
   WarningLevel,
 } from './coach';
-import { computeEfficiencyFromChats, computeChatEfficiency, EfficiencyScore } from './efficiency';
+import { computeEfficiencyFromChats, computeChatEfficiency, EfficiencyScore, windowStart } from './efficiency';
 import type { DailySnapshot } from './report';
 import {
   CHART,
@@ -51,7 +51,6 @@ import {
   columns,
   ring,
   donut,
-  segmentedBar,
   rankedBars,
   lineChart,
   type ColumnSeries,
@@ -259,7 +258,9 @@ function buildSummary(chats: ChatGroup[], config: CoachConfig): Summary {
       if (!priciest || g.totalCostNanoAiu > priciest.totalCostNanoAiu) {
         priciest = g;
       }
-      if (groupWarnings(g, config).length > 0) {
+      // Info notes are context, not waste — only warnings and errors count as flagged.
+      const worst = highestLevel(groupWarnings(g, config));
+      if (worst === 'warning' || worst === 'error') {
         flagged++;
       }
       for (const r of g.requests) {
@@ -852,9 +853,8 @@ function renderChat(
   const eff = computeChatEfficiency(chat, config);
   const effBadge = eff.hasData
     ? `<span class="grade-badge ${gradeClass(eff.score)} tip tip-left" data-tip="${escapeHtml(
-        `Chat efficiency ${eff.score}/100 — warm cache ${eff.hasCacheData ? eff.cacheScore : 'n/a'}, ` +
-          `clean runs ${eff.cleanScore} (${eff.cleanMessages}/${eff.messageCount} fully clean)` +
-          `${eff.topDrag ? ` · top drag: ${eff.topDrag}` : ''}.`
+        `Chat efficiency ${eff.score}/100 — cache timing ${eff.timingScore}, cache quality ${eff.qualityScore}` +
+          `${eff.topDrag ? ` · ${eff.topDrag}` : ''}.`
       )}">${eff.grade}</span>`
     : '';
 
@@ -1192,79 +1192,42 @@ function gradeClass(score: number): string {
   return 'grade-bad';
 }
 
-/** "Efficiency" card: the single A–F health grade, with its two sub-scores. */
-function renderEfficiencyCard(eff: EfficiencyScore): string {
+/** "Efficiency" card: the A–F grade (avoidable cache waste), with timing and quality sub-scores. */
+function renderEfficiencyCard(eff: EfficiencyScore, config: CoachConfig): string {
+  const money = (nano: number) =>
+    config.usdPerAiu > 0 ? formatUsd(nano, config.usdPerAiu) : formatCost(nano);
   if (!eff.hasData) {
-    return '';
+    return `
+    <div class="card card-eff">
+      <div class="card-label">Wasted · 7 days</div>
+      <div class="card-sub muted">No Copilot usage in the last 7 days.</div>
+    </div>`;
   }
+  const lost = eff.timingWasteNanoAiu + eff.qualityWasteNanoAiu;
   const help =
-    `A single health grade measuring AVOIDABLE waste only. Cache reuse (60%) is judged solely on ` +
-    `requests where reuse was possible — same chat, within the cache TTL. A chat's first request is ` +
-    `cold by definition and one-off focused questions are the cheap behaviour, so neither is penalized. ` +
-    `Clean runs (40%) gives partial credit: a message scores 100 with no issues, 50 with a warning, 0 ` +
-    `with an error. ` +
-    (eff.hasCacheData
-      ? `Warm-chat cache hit rate: ${formatPercent(eff.cacheHitRate)}.`
-      : `No warm-chat requests yet, so the grade currently rests on clean runs alone.`);
+    `Money spent in the last 7 days that better habits would have saved. ` +
+    `Idle pauses: you came back to a long chat after more than ~5 minutes, the cache had expired, ` +
+    `and the whole history was sent again at full price. A new chat would have been cheaper. ` +
+    `Model switches / broken cache: switching model mid-chat, or a change that broke the cache, ` +
+    `re-sent the history at full price. Big prompts and expensive tasks don't count; that's the work. ` +
+    `Score = 100 minus 2 points per 1% of spend lost.` +
+    (eff.providerMisses
+      ? ` ${eff.providerMisses} miss${eff.providerMisses === 1 ? '' : 'es'} on GPT-family models were left out: their caching is best-effort on the provider side.`
+      : '');
   const col =
     eff.score >= 75 ? CHART.green : eff.score >= 50 ? CHART.yellow : CHART.red;
-  const drag = eff.topDrag
-    ? `<div class="card-sub muted">↓ ${escapeHtml(eff.topDrag)}</div>`
-    : '';
   return `
     <div class="card card-eff ${gradeClass(eff.score)}">
-      <div class="card-label">Efficiency <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
+      <div class="card-label">Wasted · 7 days <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
       <div class="card-ringrow">
-        ${ring(eff.score / 100, { label: eff.grade, sub: `${eff.score}`, color: col, size: 76, thickness: 8 })}
+        ${ring(eff.score / 100, { label: `${eff.score}`, sub: 'score', color: col, size: 76, thickness: 8 })}
         <div class="card-ringtext">
-          <div class="card-sub muted">${eff.hasCacheData ? `Warm cache ${eff.cacheScore}` : 'Warm cache n/a'}</div>
-          <div class="card-sub muted">Clean ${eff.cleanScore} <span class="muted">(${eff.cleanMessages}/${eff.messageCount})</span></div>
-          ${drag}
+          <div class="card-value">${escapeHtml(money(lost))}</div>
+          <div class="card-sub muted">of ${escapeHtml(money(eff.totalCostNanoAiu))} spent</div>
+          <div class="card-sub muted">${escapeHtml(money(eff.timingWasteNanoAiu))} idle pauses (${eff.idleMisses})</div>
+          <div class="card-sub muted">${escapeHtml(money(eff.qualityWasteNanoAiu))} switches / breaks (${eff.breakMisses})</div>
         </div>
       </div>
-    </div>`;
-}
-
-/**
- * "Token mix" card: how tokens split across fresh input / cached input / output,
- * plus the headline input-vs-output share. Input here is everything sent to the
- * model; `cached` is the subset of input served from the prompt cache (billed
- * far cheaper). A high input share with little output is the classic
- * "shovel in context, get little produced" signal.
- */
-function renderTokenMixCard(summary: Summary): string {
-  const input = summary.totalInputTokens;
-  const output = summary.totalOutputTokens;
-  const total = input + output;
-  if (total <= 0) {
-    return '';
-  }
-  const cached = Math.min(Math.max(0, summary.totalCachedTokens), input);
-  const fresh = Math.max(0, input - cached);
-  const inputPct = Math.round((input / total) * 100);
-  const outputPct = 100 - inputPct;
-  const help =
-    `How your tokens split. Input = everything sent to the model (context, history, ` +
-    `tool catalog); Output = what it generated. Of the input, the cached part is billed ` +
-    `~80% cheaper. A high input share with very little output usually means lots of ` +
-    `context was shovelled in for little produced work. Totals: ${formatTokens(fresh)} ` +
-    `fresh input + ${formatTokens(cached)} cached input · ${formatTokens(output)} output.`;
-  const mixBar = segmentedBar(
-    [
-      { label: 'Fresh', value: fresh, color: SEMANTIC.fresh, tip: `Fresh input — ${formatTokens(fresh)} tok, billed full price` },
-      { label: 'Cached', value: cached, color: SEMANTIC.cached, tip: `Cached input — ${formatTokens(cached)} tok, ~80% cheaper` },
-      { label: 'Output', value: output, color: SEMANTIC.output, tip: `Output — ${formatTokens(output)} tok generated` },
-    ],
-    { legend: false }
-  );
-  return `
-    <div class="card card-wide">
-      <div class="card-label">Token mix <span class="tip info" data-tip="${escapeHtml(help)}">ⓘ</span></div>
-      <div class="card-value">${inputPct}% <span class="muted score-of">in</span> · ${outputPct}% <span class="muted score-of">out</span></div>
-      <div class="card-mixbar">${mixBar}</div>
-      <div class="card-sub muted">in: ${escapeHtml(formatTokensCompact(fresh))} fresh + ${escapeHtml(
-        formatTokensCompact(cached)
-      )} cached · out: ${escapeHtml(formatTokensCompact(output))}</div>
     </div>`;
 }
 
@@ -1405,7 +1368,7 @@ function renderTokenBreakdown(summary: Summary, config: CoachConfig, isOpen: boo
   const help =
     'Tokens come straight from the logs. The per-bucket AIU is an estimate: the log records only one ' +
     'total cost per request, so Token Coach distributes that real total across the buckets using the ' +
-    'configurable price weights (tokenCoach.costInputWeight / costCachedInputWeight / costOutputWeight). ' +
+    'fixed price weights (cached input ≈ 10% of fresh input, output ≈ 4×). ' +
     'The total AIU always matches the logs exactly.';
   const tokDonut = donut(
     [
@@ -1707,15 +1670,14 @@ function renderSummary(
   return `
     <div class="cards kpi-grid">
       ${renderTodayCard(summary, config)}
-      ${renderEfficiencyCard(efficiency)}
+      ${renderEfficiencyCard(efficiency, config)}
       <div class="card">
-        <div class="card-label">Cache hit rate</div>
+        <div class="card-label">Input from cache</div>
         <div class="card-ringrow">
           ${ring(cacheRate, { label: formatPercent(cacheRate), color: cacheCol, size: 76, thickness: 8 })}
-          <div class="card-ringtext"><div class="card-sub muted">cached input is<br/>~80% cheaper</div></div>
+          <div class="card-ringtext"><div class="card-sub muted">of all input tokens,<br/>billed far cheaper</div></div>
         </div>
       </div>
-      ${renderTokenMixCard(summary)}
       <div class="card">
         <div class="card-label">Activity</div>
         <div class="card-value">${summary.chatCount.toLocaleString()} <span class="muted score-of">chat${summary.chatCount === 1 ? '' : 's'}</span></div>
@@ -1758,7 +1720,7 @@ export function renderHtml(
 
   const chats = groupByChat(data);
   const summary = buildSummary(chats, config);
-  const efficiency = computeEfficiencyFromChats(chats, config);
+  const efficiency = computeEfficiencyFromChats(chats, config, windowStart());
   const inventory = analyzeToolInventory(data);
   const unusedTrend = analyzeUnusedToolTrend(data, config.unusedToolMinChats);
   const daily = buildDailySpend(data, config);
@@ -2291,7 +2253,6 @@ export function renderHtml(
     .card-wide { grid-column: span 2; }
     .card-hero .card-value { font-size: 1.95em; }
     .card-spark { margin-top: 10px; }
-    .card-mixbar { margin-top: 10px; }
     .card-ringrow { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
     .card-ringtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; line-height: 1.35; }
     @media (max-width: 520px) { .card-wide { grid-column: span 1; } }

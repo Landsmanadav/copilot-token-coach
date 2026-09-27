@@ -23,7 +23,10 @@ export interface CoachWarning {
   message: string;
 }
 
-/** All the tunable thresholds, sourced from extension settings. */
+/**
+ * All the thresholds. Fixed defaults since v2.4 — only the display choice
+ * (`usdPerAiu`, from `tokenCoach.showCostsIn`) comes from settings.
+ */
 export interface CoachConfig {
   /** NanoAiu above which a request is "expensive". */
   costWarnThreshold: number;
@@ -59,11 +62,6 @@ export interface CoachConfig {
    */
   cacheIdleMinutes: number;
   /**
-   * Warm-chat cache hit rate (0–1) that earns a perfect cache sub-score in the
-   * efficiency grade. Measured only over requests where reuse was possible.
-   */
-  cacheTargetRate: number;
-  /**
    * Net "unused across chats" score a tool must reach before the dashboard
    * flags it as a candidate to disable. +1 per chat it was offered but never
    * called, −1 (floored at 0) per chat it was used. A higher value waits for
@@ -72,7 +70,7 @@ export interface CoachConfig {
   unusedToolMinChats: number;
 }
 
-/** Sensible defaults, mirroring the values declared in package.json. */
+/** The fixed thresholds. */
 export const DEFAULT_COACH_CONFIG: CoachConfig = {
   costWarnThreshold: 25_000_000_000,
   inputWarnThreshold: 50_000,
@@ -87,7 +85,6 @@ export const DEFAULT_COACH_CONFIG: CoachConfig = {
   costCachedInputWeight: 0.1,
   costOutputWeight: 4,
   cacheIdleMinutes: 5,
-  cacheTargetRate: 0.7,
   unusedToolMinChats: 3,
 };
 
@@ -182,16 +179,18 @@ export function aggregateWarnings(records: LlmRequestRecord[], config: CoachConf
 export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig): CoachWarning[] {
   const warnings: CoachWarning[] = [];
 
-  // Cache — judged on the message's AGGREGATE hit rate (not the worst single
-  // turn), and aware of where the message sits in the chat:
-  //   • First message of a chat → cache is cold by definition. Not a problem;
-  //     show a calm info note only if it's actually low, never a warning.
-  //   • Later message with low cache → the real signal: the chat likely grew
-  //     past the cache window or its context changed.
+  // Cache — aware of where the message sits in the chat. A later message with
+  // a cold start is the real signal: the chat sat idle past the cache window,
+  // or its context changed.
+  // Judged on the message's FIRST request: that is where a pause or a changed
+  // context re-bills the history. Later agent-loop turns are always warm and
+  // would average a cold start away.
   const isFirstInChat = group.chatMessageIndex === 0;
+  const first = group.requests[0];
   const cacheLow =
-    group.totalInputTokens > config.lowCacheMinInputTokens &&
-    group.cacheHitRate < config.lowCacheRateThreshold;
+    first !== undefined &&
+    first.inputTokens > config.lowCacheMinInputTokens &&
+    first.cachedTokens / first.inputTokens < config.lowCacheRateThreshold;
 
   // Did enough idle time pass before this message to expire the prompt cache?
   // We have the real cache numbers, so we only blame idle when cache *also*
@@ -200,15 +199,8 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
   const idleGap = group.idleGapMsBefore ?? 0;
   const idleExpired = !isFirstInChat && cacheIdleMs > 0 && idleGap >= cacheIdleMs;
 
-  if (cacheLow && isFirstInChat) {
-    warnings.push({
-      rule: 'cold-start',
-      level: 'info',
-      message:
-        'First message of the chat — caching starts cold, so low reuse here is expected. ' +
-        'Staying in this chat reuses the cache (and lowers cost) on later turns.',
-    });
-  } else if (cacheLow && idleExpired) {
+  // The first message of a chat is cold by definition — nothing to coach there.
+  if (cacheLow && !isFirstInChat && idleExpired) {
     const mins = Math.round(idleGap / 60_000);
     warnings.push({
       rule: 'cache-expired-idle',
@@ -218,10 +210,12 @@ export function analyzeMessageDrivers(group: MessageGroup, config: CoachConfig):
         `the cached context expired and was re-billed at the full (much higher) input rate this turn. ` +
         `Keep a thread warm by sending the next message within ~5 min, or batch related questions together.`,
     });
-  } else if (cacheLow) {
+  } else if (cacheLow && !isFirstInChat) {
+    // Claude's cache is deterministic, so a warm-window miss means the context
+    // changed. Other providers cache best-effort — worth a note, not a warning.
     warnings.push({
       rule: 'low-cache-hit',
-      level: 'warning',
+      level: /claude|anthropic/i.test(first.model) ? 'warning' : 'info',
       message:
         'Low cache reuse mid-chat — the conversation likely outgrew the cache window or its ' +
         'context changed between turns. If this is a new/unrelated task, a fresh focused chat ' +

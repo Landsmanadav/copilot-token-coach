@@ -301,50 +301,6 @@ export function donut(segments: DonutSegment[], opts: DonutOpts = {}): string {
 }
 
 // ---------------------------------------------------------------------------
-// Segmented bar — a single 100%-width stacked bar (HTML; crisp text).
-// ---------------------------------------------------------------------------
-
-export interface BarSegment {
-  label: string;
-  value: number;
-  color: string;
-  tip?: string;
-}
-
-/**
- * One horizontal 100%-stacked bar plus a wrapped legend. HTML/flexbox rather
- * than SVG so the legend text stays crisp and wraps naturally. Used for the
- * token mix (in/out) and the per-message context split.
- */
-export function segmentedBar(segments: BarSegment[], opts: { legend?: boolean } = {}): string {
-  const showLegend = opts.legend ?? true;
-  const total = segments.reduce((s, x) => s + Math.max(0, x.value), 0);
-  if (total <= 0) {
-    return '';
-  }
-  const parts = segments
-    .filter((s) => s.value > 0)
-    .map((s) => {
-      const pct = (s.value / total) * 100;
-      const tip = s.tip ? ` data-tip="${escAttr(s.tip)}"` : '';
-      return `<span class="segbar-part${s.tip ? ' tip' : ''}" style="width:${n(pct)}%;background:${s.color}"${tip}></span>`;
-    })
-    .join('');
-  const legend = showLegend
-    ? `<div class="segbar-legend">${segments
-        .filter((s) => s.value > 0)
-        .map((s) => {
-          const pct = Math.round((s.value / total) * 100);
-          return `<span class="segbar-key"><span class="segbar-dot" style="background:${s.color}"></span>${escAttr(
-            s.label
-          )} <span class="muted">${pct}%</span></span>`;
-        })
-        .join('')}</div>`
-    : '';
-  return `<div class="segbar-wrap"><div class="segbar">${parts}</div>${legend}</div>`;
-}
-
-// ---------------------------------------------------------------------------
 // Ranked bars — labelled horizontal bars, biggest first (HTML; crisp text).
 // ---------------------------------------------------------------------------
 
